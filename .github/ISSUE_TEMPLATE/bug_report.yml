@@ -1,0 +1,23 @@
+name: Bug report
+description: Report a reproducible extension problem.
+labels: [bug]
+body:
+  - type: textarea
+    id: behavior
+    attributes:
+      label: What happened?
+      description: Include expected behavior and steps to reproduce. Do not attach credentials or private transcripts.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: Pi version, Node version, OS, provider/model
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Sanitized error or test output
+      render: text

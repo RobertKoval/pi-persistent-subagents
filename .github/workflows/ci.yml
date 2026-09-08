@@ -1,0 +1,54 @@
+name: CI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    name: Node ${{ matrix.node }} · ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            node: 22.19.0
+          - os: macos-latest
+            node: 24
+    runs-on: ${{ matrix.os }}
+    env:
+      PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-test-agent
+      PI_OFFLINE: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm test
+      - run: npm run typecheck
+      - run: npm run test:e2e
+  package:
+    name: Package installation
+    runs-on: ubuntu-latest
+    env:
+      PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-package-agent
+      PI_OFFLINE: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      - run: |
+          archive=$(npm pack --pack-destination "$RUNNER_TEMP" --silent)
+          mkdir "$RUNNER_TEMP/unpacked"
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/unpacked"
+          cd "$RUNNER_TEMP/unpacked/package"
+          npm install --ignore-scripts
+          npm test
+          npm run typecheck
+          npm run test:e2e
