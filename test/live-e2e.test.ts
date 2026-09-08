@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { PersistentPiRpcClient } from '../src/rpc-client.ts';
 const root = fileURLToPath(new URL('..', import.meta.url));
 it('loads and executes the extension command in installed Pi without a model call', {skip: process.env.PI_PERSISTENT_SUBAGENTS_E2E !== '1'}, async () => {
-  const client = new PersistentPiRpcClient({command:'pi',args:['-e',root,'--mode','rpc','--no-session','--offline'],cwd:root});
+  const client = new PersistentPiRpcClient({command:'pi',args:['--no-extensions','-e',root,'--mode','rpc','--no-session','--offline'],cwd:root});
   const errors: unknown[] = [];
   client.onEvent(e=>{if(e.type==='extension_error') errors.push(e);});
   try {

@@ -32,3 +32,5 @@ Workers expose `id`, `status`, `alive`, `pid` when live, provider/model/thinking
 `close_agent` stops the process but keeps metadata. `resume_agent` returns a different PID on the same saved session and reports `cold_process`. Related turns in a live process report `warm_process`; neither label is proof of a provider cache hit.
 
 Thinking levels: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. Availability depends on the model.
+
+Completion notifications are short, passive signals. They do not include worker output or start a new manager turn. Use `wait_agent` with the notified ID to fetch the result on demand.

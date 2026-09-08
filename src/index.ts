@@ -74,7 +74,7 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
 
     if (loaded.config.notifyOnSettled) {
       pool.onSettled((snapshot) => {
-        const content = completionNotification(snapshot, loaded.config.notificationMaxChars);
+        const content = completionNotification(snapshot);
         pi.sendMessage(
           {
             customType: 'persistent-subagent-notification',
@@ -87,7 +87,7 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
               status: snapshot.status,
             },
           },
-          { triggerTurn: true, deliverAs: 'steer' },
+          { triggerTurn: false },
         );
       });
     }
@@ -328,25 +328,6 @@ function humanAgentList(agents: WorkerSnapshot[]): string {
   }).join('\n');
 }
 
-function completionNotification(snapshot: WorkerSnapshot, maxChars: number): string {
-  const output = truncate(snapshot.lastOutput ?? '', maxChars);
-  const payload = {
-    id: snapshot.id,
-    name: snapshot.name,
-    role: snapshot.role,
-    status: snapshot.status,
-    pid: snapshot.pid,
-    session_file: snapshot.sessionFile,
-    task: snapshot.taskPreview,
-    output,
-    error: snapshot.error,
-    usage: snapshot.usage,
-    cache_continuity: snapshot.cacheContinuity,
-  };
-  return `<persistent_subagent_notification>\n${JSON.stringify(payload)}\n</persistent_subagent_notification>`;
-}
-
-function truncate(text: string, maxChars: number): string {
-  if (text.length <= maxChars) return text;
-  return `${text.slice(0, Math.max(0, maxChars - 1))}…`;
+function completionNotification(snapshot: WorkerSnapshot): string {
+  return `Worker ${snapshot.id}: ${snapshot.error ? 'error' : snapshot.status}. Use wait_agent for its result.`;
 }

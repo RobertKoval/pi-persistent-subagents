@@ -18,7 +18,7 @@ Project settings override global settings. Role maps merge by role name. An inva
 | `commandTimeoutMs` | `30000` | Deadline for a command acknowledgement, not task completion. |
 | `shutdownGraceMs` | `1500` | Grace before forced process termination. |
 | `notifyOnSettled` | `true` | Deliver completion messages to the parent. |
-| `notificationMaxChars` | `4000` | Maximum output excerpt in a completion message. |
+| `notificationMaxChars` | `4000` | Deprecated; accepted for existing configurations but unused by short notifications. |
 | `inheritParentProvider` | `true` | Use the parent's provider unless overridden. |
 | `inheritParentModel` | `false` | Prefer explicit/role models; absent a selection, fall back to the parent's model. |
 | `inheritParentThinking` | `true` | Inherit the parent's thinking level unless overridden. |
@@ -40,4 +40,4 @@ For pi-accounts 0.51, the extension copies only its version-1 named selection me
 
 `maxDepth: 1` allows the manager to spawn workers and hides this extension's lifecycle tools at child depth. Raising the limit does not install the extension into child Pi instances; ensure child extension discovery is configured if you want nested teams.
 
-Completion messages may arrive while the manager is using `wait_agent` or `list_agents`. Set `notifyOnSettled: false` if you prefer explicit polling. Keeping `idleTtlMs: 0` avoids losing process continuity between related tasks.
+Completion messages contain only the worker ID and status, with a hint to fetch its result. They carry no output, task text or usage, and do not trigger a new model turn or steer a running turn. Pi appends them after the current turn when necessary. The manager can retrieve the result with `wait_agent` when needed. Set `notifyOnSettled: false` if you prefer explicit polling. Keeping `idleTtlMs: 0` avoids losing process continuity between related tasks.
