@@ -20,7 +20,7 @@ Project settings override global settings. Role maps merge by role name. An inva
 | `notifyOnSettled` | `true` | Deliver completion messages to the parent. |
 | `notificationMaxChars` | `4000` | Deprecated; accepted for existing configurations but unused by short notifications. |
 | `inheritParentProvider` | `true` | Use the parent's provider unless overridden. |
-| `inheritParentModel` | `false` | Prefer explicit/role models; absent a selection, fall back to the parent's model. |
+| `inheritParentModel` | `false` | Use an explicit/role model; absent one, let child Pi select its default. Set true to inherit the parent model. |
 | `inheritParentThinking` | `true` | Inherit the parent's thinking level unless overridden. |
 | `roles` | `{}` | Named provider/model/thinking profiles. |
 

@@ -32,6 +32,8 @@ npm run test:live:shutdown   # Parent + workers + shell descendants
 npm run test:live:cache     # Persistent vs restarted process, same transcript
 ```
 
+The live harness explicitly loads the checkout and the standard npm installation of pi-accounts, avoiding duplicate registration when the released extension is already installed. Set `PI_TEST_ACCOUNTS_EXTENSION` to an existing account extension path for a nonstandard installation. Other parent extensions are excluded from these tests.
+
 Set `PI_TEST_ACCOUNT` to a non-secret pi-accounts account name to choose it for the temporary parent session. This does not change the global account selection. The harness checks inherited metadata; switching identities during an active session remains a separate provider-specific scenario.
 
 The cache comparison alternates task order across two arms, with five equivalent tasks each. The restarted arm retains its session/transcript while changing PID each turn. Totals are checked against actual Pi session assistant messages. This tests usage accounting and process continuity; it does not independently measure Business credits, quota or socket reuse.

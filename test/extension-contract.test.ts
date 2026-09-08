@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import extension from '../src/index.ts';
+import { decode } from '@toon-format/toon';
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const f of cleanups.splice(0).reverse()) await f(); });
@@ -42,7 +43,7 @@ it('lists the same session path exposed by spawn after settling', async () => {
   const h = await harness();
   const spawned = (await h.call('spawn_agent', { task: 'hello' })).details;
   await h.call('wait_agent', { ids: [spawned.id], timeout_ms: 2000 });
-  const listed = JSON.parse((await h.call('list_agents', {})).content[0].text)[0];
+  const listed = (decode((await h.call('list_agents', {verbose:true})).content[0].text) as any).agents[0];
   assert.equal(listed.session_file, spawned.sessionFile);
   assert.equal(listed.pid, spawned.pid);
   assert.equal(listed.status, 'idle');
@@ -92,3 +93,36 @@ for (const task of ['PRIVATE_OUTPUT_'.repeat(1000), '__PROVIDER_ERROR__']) {
     else assert.equal(result.lastOutput,`ECHO:${task}`);
   });
 }
+
+it('returns compact TOON acknowledgements and lists, with full results and diagnostics only on request', async () => {
+  const h=await harness();
+  const task='multi-line output\nwith commas, quotes " and Unicode українська';
+  const spawned=await h.call('spawn_agent',{task,model:'worker-model',name:'reviewer, "one"\nsecond line'});
+  const w=spawned.details;
+  await h.call('wait_agent',{ids:[w.id],timeout_ms:2000});
+  const sent=await h.call('send_input',{id:w.id,message:task});
+  assert.deepEqual(decode(sent.content[0].text),{id:w.id,status:sent.details.status,pid:w.pid});
+  const waited=await h.call('wait_agent',{ids:[w.id],timeout_ms:2000});
+  assert.deepEqual(decode(waited.content[0].text),{timed_out:false,agents:[{id:w.id,status:'idle',error:null,output:`ECHO:${task}`}]});
+  const list=decode((await h.call('list_agents',{})).content[0].text) as any;
+  assert.deepEqual(list,{agents:[{id:w.id,name:'reviewer, "one"\nsecond line',status:'idle',pid:w.pid,model:'openai-codex/worker-model',error:null}]});
+  const verbose=decode((await h.call('list_agents',{verbose:true})).content[0].text) as any;
+  assert.equal(verbose.agents[0].session_file,w.sessionFile);
+  assert.equal(verbose.agents[0].last_output,`ECHO:${task}`);
+  const closed=decode((await h.call('close_agent',{id:w.id})).content[0].text);
+  assert.deepEqual(closed,{id:w.id,status:'closed'});
+  const resumed=await h.call('resume_agent',{id:w.id});
+  assert.deepEqual(decode(resumed.content[0].text),{id:w.id,status:'idle',pid:resumed.details.pid,cache_continuity:'cold_process'});
+});
+
+it('retains provider failures and timeout state in compact wait results', async () => {
+  const h=await harness();
+  const w=(await h.call('spawn_agent',{task:'__SLOW__'})).details;
+  const timeout=decode((await h.call('wait_agent',{ids:[w.id],timeout_ms:1})).content[0].text) as any;
+  assert.equal(timeout.timed_out,true);
+  assert.equal(timeout.agents[0].status,'running');
+  await h.call('send_input',{id:w.id,message:'__PROVIDER_ERROR__',mode:'interrupt'});
+  const result=decode((await h.call('wait_agent',{ids:[w.id],timeout_ms:2000})).content[0].text) as any;
+  assert.match(result.agents[0].error,/usage limit/);
+  assert.equal(result.agents[0].output,null);
+});

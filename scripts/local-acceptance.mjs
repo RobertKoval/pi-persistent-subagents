@@ -5,12 +5,15 @@ import { join, resolve } from 'node:path';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { seedAccountSelection } from '../src/account-selection.ts';
+import { existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 const root = resolve(import.meta.dirname, '..');
 const work = await mkdtemp(join(tmpdir(), 'pi-live-'));
 await mkdir(join(work, '.pi'));
 await writeFile(join(work, '.pi/persistent-subagents.json'), JSON.stringify({ notifyOnSettled: process.argv.includes('--manager') }));
-const client = new PersistentPiRpcClient({ command: 'pi', args: ['-e', join(root, 'test/fakes/probe-extension.ts'), '--mode', 'rpc', '--session', join(work, 'parent.jsonl'), '--provider', 'openai-codex', '--model', process.argv.includes('--manager') ? 'gpt-5.6-terra' : 'gpt-5.6-luna', '--thinking', 'low', '--offline', '--no-context-files', '--approve'], cwd: work, startupTimeoutMs: 30000, commandTimeoutMs: 120000, shutdownGraceMs: 10000 });
+const accountsExtension = process.env.PI_TEST_ACCOUNTS_EXTENSION ?? join(process.env.PI_CODING_AGENT_DIR || join(homedir(), '.pi', 'agent'), 'npm/node_modules/@narumitw/pi-accounts');
+const accountArgs = existsSync(accountsExtension) ? ['-e', accountsExtension] : [];
+const client = new PersistentPiRpcClient({ command: 'pi', args: ['--no-extensions', ...accountArgs, '-e', join(root, 'test/fakes/probe-extension.ts'), '--mode', 'rpc', '--session', join(work, 'parent.jsonl'), '--provider', 'openai-codex', '--model', process.argv.includes('--manager') ? 'gpt-5.6-terra' : 'gpt-5.6-luna', '--thinking', 'low', '--offline', '--no-context-files', '--approve'], cwd: work, startupTimeoutMs: 30000, commandTimeoutMs: 120000, shutdownGraceMs: 10000 });
 if(process.env.PI_TEST_ACCOUNT) seedAccountSelection(join(work,'parent.jsonl'),work,{
  getSessionId:()=> 'acceptance-seed', getEntries:()=>[{type:'custom',customType:'pi-accounts-selection',data:{version:1,sessionId:'acceptance-seed',providers:{'openai-codex':process.env.PI_TEST_ACCOUNT}}}]
 });
@@ -44,6 +47,9 @@ try {
    await client.prompt('This is a live acceptance test, not implementation work. Use the persistent tools spawn_agent, send_input, wait_agent, list_agents, close_agent, resume_agent. Do not use the legacy subagent tool or shell Pi processes. Spawn exactly two workers: gpt-5.6-luna and gpt-5.6-terra, both low thinking. Ask each to remember a distinct marker and reply READY; no file access is needed. Wait for both, list them, send each a follow-up asking for its marker, wait and list again. Then close and resume the Luna worker, ask it for its marker again, wait and list. Verify same PID/session for related live turns, changed PID and same session on resume, correct recall. Leave both workers idle and alive for an external shutdown observer. Finish with a brief factual assessment of whether the tools are convenient and any observed shortcomings. Do not call any more tools after your final assessment. Completion notifications are informational; do not spawn more workers in response to them.');
    await client.waitForIdle(240000);
    off();
+   const managerMessages=(await client.request({type:'get_messages'})).data.messages;
+   const lastManager=managerMessages.filter(m=>m.role==='assistant').at(-1);
+   assert.notEqual(lastManager?.stopReason,'error',lastManager?.errorMessage);
    assert.equal(calls.filter(c=>c.tool==='spawn_agent').length,2);
    for(const tool of ['spawn_agent','send_input','wait_agent','list_agents','close_agent','resume_agent']) assert.ok(calls.some(c=>c.tool===tool),tool+' must be exercised by the manager');
    assert.ok(!calls.some(c=>c.error),'manager tools must succeed');

@@ -1,4 +1,5 @@
 import { seedAccountSelection } from './account-selection.ts';
+import { encode } from '@toon-format/toon';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
@@ -158,7 +159,7 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
         thinking: params.thinking,
         cwd: params.cwd,
       });
-      return toolResult(snapshotSummary(snapshot), snapshot);
+      return toolResult(acknowledgement(snapshot, 'spawn'), snapshot);
     },
   });
 
@@ -178,7 +179,7 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
     execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
       const bundle = await ensurePool(ctx);
       const snapshot = await bundle.pool.sendInput(params.id, params.message, (params.mode ?? 'auto') as SendMode);
-      return toolResult(snapshotSummary(snapshot), snapshot);
+      return toolResult(acknowledgement(snapshot, 'input'), snapshot);
     },
   });
 
@@ -192,6 +193,7 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
       ids: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 64 }),
       until: Type.Optional(Type.Union([Type.Literal('any'), Type.Literal('all')])),
       timeout_ms: Type.Optional(Type.Integer({ minimum: 1, maximum: 3_600_000 })),
+      verbose: Type.Optional(Type.Boolean({ description: 'Include full diagnostic metadata and usage.' })),
     }),
     execute: async (_toolCallId, params, signal, _onUpdate, ctx) => {
       const bundle = await ensurePool(ctx);
@@ -201,20 +203,20 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
         timeoutMs: params.timeout_ms ?? 30_000,
         signal,
       });
-      return toolResult(JSON.stringify({ timed_out: result.timedOut, agents: simplifySnapshots(Object.values(result.statuses)) }, null, 2), result);
+      return toolResult(encode({ timed_out: result.timedOut, agents: params.verbose ? simplifySnapshots(Object.values(result.statuses)) : Object.values(result.statuses).map(s => ({id:s.id,status:s.status,error:s.error ?? null,output:s.lastOutput})) }), result);
     },
   });
 
   pi.registerTool({
     name: 'list_agents',
     label: 'List persistent agents',
-    description: 'List live and resumable persistent workers, including PID, lifecycle, model/provider, session, usage, and latest output.',
+    description: 'List worker IDs, names, states, PIDs, models and errors in compact TOON. Use wait_agent for selected results; verbose adds full diagnostics and latest output.',
     promptSnippet: 'Inspect persistent worker state before spawning redundant workers.',
-    parameters: Type.Object({}),
-    execute: async (_toolCallId, _params, _signal, _onUpdate, ctx) => {
+    parameters: Type.Object({verbose: Type.Optional(Type.Boolean({description: 'Include full metadata, usage and latest output.'}))}),
+    execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
       const bundle = await ensurePool(ctx);
       const agents = bundle.pool.listAgents();
-      return toolResult(JSON.stringify(simplifySnapshots(agents), null, 2), agents);
+      return toolResult(encode({agents: params.verbose ? simplifySnapshots(agents) : agents.map(s => ({id:s.id,name:s.name ?? s.role ?? null,status:s.status,pid:s.pid ?? null,model:modelLabel(s),error:s.error ?? null}))}), agents);
     },
   });
 
@@ -226,7 +228,7 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
     execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
       const bundle = await ensurePool(ctx);
       const snapshot = await bundle.pool.closeAgent(params.id);
-      return toolResult(snapshotSummary(snapshot), snapshot);
+      return toolResult(acknowledgement(snapshot, 'close'), snapshot);
     },
   });
 
@@ -238,7 +240,7 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
     execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
       const bundle = await ensurePool(ctx);
       const snapshot = await bundle.pool.resumeAgent(params.id);
-      return toolResult(snapshotSummary(snapshot), snapshot);
+      return toolResult(acknowledgement(snapshot, 'resume'), snapshot);
     },
   });
 
@@ -279,24 +281,19 @@ function toolResult(text: string, details: unknown) {
   return { content: [{ type: 'text' as const, text }], details };
 }
 
-function snapshotSummary(snapshot: WorkerSnapshot): string {
-  return JSON.stringify({
+function modelLabel(snapshot: WorkerSnapshot): string | null {
+  return snapshot.model ? [snapshot.provider, snapshot.model].filter(Boolean).join('/') : null;
+}
+
+function acknowledgement(snapshot: WorkerSnapshot, operation: 'spawn' | 'input' | 'close' | 'resume'): string {
+  return encode({
     id: snapshot.id,
-    name: snapshot.name,
-    role: snapshot.role,
     status: snapshot.status,
-    pid: snapshot.pid,
-    alive: snapshot.alive,
-    provider: snapshot.provider,
-    model: snapshot.model,
-    thinking: snapshot.thinking,
-    cwd: snapshot.cwd,
-    session_file: snapshot.sessionFile,
-    cache_continuity: snapshot.cacheContinuity,
-    usage: snapshot.usage,
-    last_output: snapshot.lastOutput,
-    error: snapshot.error,
-  }, null, 2);
+    ...(snapshot.pid !== undefined ? {pid:snapshot.pid} : {}),
+    ...(operation === 'spawn' ? {model:modelLabel(snapshot)} : {}),
+    ...(operation === 'resume' ? {cache_continuity:snapshot.cacheContinuity} : {}),
+    ...(snapshot.error ? {error:snapshot.error} : {}),
+  });
 }
 
 function simplifySnapshots(snapshots: WorkerSnapshot[]) {

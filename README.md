@@ -24,7 +24,7 @@ A worker owns an ongoing workstream: a code area, an investigation, or a review.
 
 - **Continue without restarting.** Reuse a worker with `send_input`.
 - **Steer work in flight.** Redirect, queue a follow-up, or interrupt.
-- **See what is happening.** Inspect PID, session, latest result, errors, and token/cache usage.
+- **See what is happening.** Get compact TOON status; request full results and token/cache diagnostics when needed.
 - **Resume deliberately.** Close a worker and reopen its saved conversation later.
 - **Keep ownership clear.** Workers exit when the parent shuts down; sessions remain resumable.
 
@@ -60,7 +60,7 @@ pi -e .
 | `spawn_agent` | Start a persistent worker with a task and optional role/model. |
 | `send_input` | Continue an idle worker, steer a running one, queue work, or interrupt. |
 | `wait_agent` | Wait for any/all selected workers. A timeout leaves them alive. |
-| `list_agents` | Inspect live and resumable workers, results, errors, sessions and usage. |
+| `list_agents` | Inspect worker states in a compact list; fetch results and diagnostics when needed. |
 | `close_agent` | Stop the process and retain its conversation. |
 | `resume_agent` | Start a new process on the saved conversation. |
 

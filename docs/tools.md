@@ -6,8 +6,8 @@ All IDs refer to workers owned by the current parent session. `/pworkers` provid
 | --- | --- | --- |
 | `spawn_agent` | `task` | `name`, `role`, `provider`, `model`, `thinking`, `cwd` |
 | `send_input` | `id`, `message` | `mode`: `auto`, `steer`, `follow_up`, `interrupt` |
-| `wait_agent` | `ids` | `until`: `any` or `all`; `timeout_ms` (default 30000) |
-| `list_agents` | — | — |
+| `wait_agent` | `ids` | `until`: `any` or `all`; `timeout_ms` (default 30000); `verbose` |
+| `list_agents` | — | `verbose` |
 | `close_agent` | `id` | — |
 | `resume_agent` | `id` | — |
 
@@ -25,7 +25,15 @@ State-changing input is serialized per worker. Use `wait_agent` to wait for the 
 
 ## Results and lifecycle
 
-Workers expose `id`, `status`, `alive`, `pid` when live, provider/model/thinking, `session_file`, latest output, optional error, cache continuity, and cumulative usage. `idle` means the run has settled: check `error` and the output before interpreting it as success.
+Model-visible tool results use [TOON](https://github.com/toon-format/toon). Pi RPC itself remains JSONL, and structured tool `details` remain unchanged for integrations.
+
+- `send_input` acknowledges with `id`, `status`, `pid` and an error if present. It does not repeat output, paths or usage.
+- `spawn_agent` also reports the selected provider/model; `resume_agent` adds cache continuity.
+- `list_agents` returns a compact table of ID, name/role, state, PID, model and error. It does not fetch worker output.
+- `wait_agent` returns timeout state and each selected worker's ID, state, error and full latest output.
+- `verbose: true` on list/wait adds the full metadata, session path, usage and latest output for diagnostics.
+
+`idle` means the run has settled: check `error` and the output before interpreting it as success. Multiline output and special characters are encoded by the TOON library without truncation.
 
 `wait_agent` returns when the requested workers are idle, closed or crashed. Its timeout does not kill them. A crashed worker needs `resume_agent` before more input; a saved session must exist.
 
