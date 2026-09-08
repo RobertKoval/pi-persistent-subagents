@@ -10,7 +10,7 @@ import { execFileSync } from 'node:child_process';
 const root = resolve(import.meta.dirname, '..');
 const work = await mkdtemp(join(tmpdir(), 'pi-live-'));
 await mkdir(join(work, '.pi'));
-await writeFile(join(work, '.pi/persistent-subagents.json'), JSON.stringify({ notifyOnSettled: process.argv.includes('--manager') }));
+await writeFile(join(work, '.pi/persistent-subagents.json'), JSON.stringify({ notifyOnSettled: process.argv.includes('--manager') || process.argv.includes('--wake') }));
 const accountsExtension = process.env.PI_TEST_ACCOUNTS_EXTENSION ?? join(process.env.PI_CODING_AGENT_DIR || join(homedir(), '.pi', 'agent'), 'npm/node_modules/@narumitw/pi-accounts');
 const accountArgs = existsSync(accountsExtension) ? ['-e', accountsExtension] : [];
 const client = new PersistentPiRpcClient({ command: 'pi', args: ['--no-extensions', ...accountArgs, '-e', join(root, 'test/fakes/probe-extension.ts'), '--mode', 'rpc', '--session', join(work, 'parent.jsonl'), '--provider', 'openai-codex', '--model', process.argv.includes('--manager') ? 'gpt-5.6-terra' : 'gpt-5.6-luna', '--thinking', 'low', '--offline', '--no-context-files', '--approve'], cwd: work, startupTimeoutMs: 30000, commandTimeoutMs: 120000, shutdownGraceMs: 10000 });
@@ -38,7 +38,41 @@ try {
  const inspection = await probe('inspect');
  console.log(JSON.stringify({ stage: 'inspect', ...inspection, selected: undefined, accountSelectionCount: Object.keys(inspection.selected ?? {}).length }));
  const signal = process.argv.find(a => ['SIGTERM','SIGHUP','SIGKILL'].includes(a));
- if(process.argv.includes('--manager')) {
+ if(process.argv.includes('--wake')) {
+   let settled=0;
+   let completed=false;
+   let waited=false;
+   let firstOutput;
+   let notified=false;
+   let idleBeforeNotification=false;
+   let latestText='';
+   const off=client.onEvent(e=>{
+     if(e.type==='message_end'&&e.message?.customType==='persistent-subagent-notification') notified=true;
+     if(e.type==='message_end'&&e.message?.role==='assistant') {
+       if(e.message.stopReason==='error') console.log(JSON.stringify({stage:'provider-error',error:e.message.errorMessage}));
+       latestText=(e.message.content??[]).filter(p=>p.type==='text').map(p=>p.text).join('\n');
+     }
+     if(e.type==='tool_execution_end'&&e.toolName==='wait_agent') waited=true;
+     if(e.type==='agent_settled') {
+       settled++;
+       if(settled===1) { firstOutput=latestText; idleBeforeNotification=!notified; }
+       if(waited&&latestText.includes('AUTO_RESUMED_739')) completed=true;
+     }
+   });
+   await client.prompt('Acceptance test: spawn exactly one gpt-5.6-luna worker at low thinking. Its task is to execute bash sleep 12 and then reply WORKER_DONE_739. After spawn returns, do not wait or use any more tools in this initial turn: reply WAITING_739 and end your turn. When a worker completion notification arrives later, call wait_agent for its result. If it contains WORKER_DONE_739, reply AUTO_RESUMED_739 and finish. Never spawn another worker.');
+   const deadline=Date.now()+120000;
+   while(!completed&&Date.now()<deadline) await new Promise(r=>setTimeout(r,100));
+   off();
+   assert.ok(firstOutput?.includes('WAITING_739'),'manager must finish the initial turn before resuming');
+   assert.ok(idleBeforeNotification && notified,'manager must be idle before the completion notification arrives');
+   assert.ok(completed,'worker completion must wake the manager without any user prompt');
+   assert.ok(settled>=2);
+   const workers=(await probe('list_agents')).details;
+   assert.equal(workers.length,1);
+   await client.stop();
+   for(const w of workers) assert.throws(()=>process.kill(w.pid,0),{code:'ESRCH'});
+   console.log(JSON.stringify({stage:'automatic-wake',initialTurnFinished:true,resumedWithoutUserInput:true,workerGone:true}));
+ } else if(process.argv.includes('--manager')) {
    const calls=[];
    const off=client.onEvent(e=>{if(e.type==='tool_execution_end') {
      calls.push({tool:e.toolName,error:e.isError,result:e.result?.details});

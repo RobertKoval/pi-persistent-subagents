@@ -41,4 +41,4 @@ Model-visible tool results use [TOON](https://github.com/toon-format/toon). Pi R
 
 Thinking levels: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. Availability depends on the model.
 
-Completion notifications are short, passive signals. They do not include worker output or start a new manager turn. Use `wait_agent` with the notified ID to fetch the result on demand.
+Completion notifications are short wake-up signals without worker output. They start a turn when the manager is idle, or queue a follow-up when it is busy. Set notifyOnSettled:false to disable automatic continuation. Use `wait_agent` with the notified ID to fetch the result on demand.

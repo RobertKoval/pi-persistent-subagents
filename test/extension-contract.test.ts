@@ -80,14 +80,14 @@ it('session shutdown terminates the actual worker PID', async () => {
 });
 
 for (const task of ['PRIVATE_OUTPUT_'.repeat(1000), '__PROVIDER_ERROR__']) {
-  it(`sends a short passive completion signal (${task === '__PROVIDER_ERROR__' ? 'error' : 'success'}) and keeps results available on demand`, async () => {
+  it(`sends a short completion signal that wakes the manager without steering (${task === '__PROVIDER_ERROR__' ? 'error' : 'success'}) and keeps results available on demand`, async () => {
     const h = await harness();
     const worker = (await h.call('spawn_agent', {task})).details;
     await h.call('wait_agent', {ids:[worker.id],timeout_ms:2000});
     assert.equal(h.notifications.length,1);
     const {message,options} = h.notifications[0];
     assert.equal(message.content, `Worker ${worker.id}: ${task === '__PROVIDER_ERROR__' ? 'error' : 'idle'}. Use wait_agent for its result.`);
-    assert.deepEqual(options,{triggerTurn:false});
+    assert.deepEqual(options,{triggerTurn:true,deliverAs:'followUp'});
     const result=(await h.call('wait_agent',{ids:[worker.id],timeout_ms:2000})).details.statuses[worker.id];
     if(task==='__PROVIDER_ERROR__') assert.match(result.error,/usage limit/);
     else assert.equal(result.lastOutput,`ECHO:${task}`);

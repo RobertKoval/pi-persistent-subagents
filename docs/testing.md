@@ -27,6 +27,7 @@ These commands use your authenticated Pi account and **consume model quota**. Th
 ```sh
 npm run test:live            # Same PID, account metadata, resume and recall
 npm run test:live:manager    # Terra managing Luna/Terra through all six tools
+npm run test:live:wake       # Manager ends a turn, then resumes on worker completion
 npm run test:live:streaming  # Actual steer/follow_up/abort RPC routing
 npm run test:live:shutdown   # Parent + workers + shell descendants
 npm run test:live:cache     # Persistent vs restarted process, same transcript

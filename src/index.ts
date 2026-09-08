@@ -88,7 +88,7 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
               status: snapshot.status,
             },
           },
-          { triggerTurn: false },
+          { triggerTurn: true, deliverAs: 'followUp' },
         );
       });
     }
