@@ -260,3 +260,18 @@ it('cleanup preempts an unacknowledged spawn instead of waiting for its command 
     assert.ok((await spawning) instanceof Error);
   } finally {clearTimeout(timer!);await spawning;}
 });
+
+it('assigns one completion ID per settled run, preserving identity across resume and changing it for new work', async () => {
+ const {pool}=await makePool(); const completions:any[]=[];
+ pool.onSettled(s=>completions.push(s));
+ const w=await pool.spawnAgent({task:'__DUPLICATE_SETTLED__'});
+ await pool.waitForAgents({ids:[w.id],timeoutMs:2000});
+ assert.equal(completions.length,1); const first=pool.getAgent(w.id)!;
+ assert.ok(first.completionId);
+ await pool.closeAgent(w.id);const resumed=await pool.resumeAgent(w.id);
+ assert.equal(resumed.completionId,first.completionId);
+ await pool.sendInput(w.id,'__DUPLICATE_SETTLED__');
+ await pool.waitForAgents({ids:[w.id],timeoutMs:2000});
+ assert.equal(completions.length,2);assert.notEqual(completions[1].completionId,first.completionId);
+ assert.equal(completions[1].lastOutput,first.lastOutput);
+});

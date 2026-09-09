@@ -96,7 +96,7 @@ describe('resolveWorkerSelection', () => {
     assert.equal(result.thinking, 'medium');
   });
 
-  it('parses provider/model override and lets explicit fields beat the role', () => {
+  it('preserves an explicit provider-scoped model and lets explicit fields beat the role', () => {
     const config = structuredClone(DEFAULT_CONFIG);
     const role = { provider: 'role-provider', model: 'role-model', thinking: 'low' as const };
     const result = resolveWorkerSelection({
@@ -106,7 +106,7 @@ describe('resolveWorkerSelection', () => {
       cwd: '/other',
     }, parent, config, role);
     assert.equal(result.provider, 'explicit-provider');
-    assert.equal(result.model, 'explicit-model');
+    assert.equal(result.model, 'other-provider/explicit-model');
     assert.equal(result.thinking, 'xhigh');
     assert.equal(result.cwd, '/other');
   });
@@ -122,4 +122,31 @@ describe('resolveWorkerSelection', () => {
     const result = resolveWorkerSelection({}, parent, config, undefined);
     assert.equal(result.model, 'manager-strong');
   });
+});
+
+for (const [provider,model,expected] of [
+ ['openrouter','@preset/glm53','@preset/glm53'],
+ ['openrouter','z-ai/glm-5','z-ai/glm-5'],
+ ['openrouter','openrouter/@preset/glm53','@preset/glm53'],
+ [undefined,'@preset/glm53','@preset/glm53'],
+] as const) {
+ it(`preserves provider model ID ${model}`,()=>{
+   const r=resolveWorkerSelection({provider,model},{cwd:'/tmp',provider:'openrouter'},DEFAULT_CONFIG,undefined);
+   assert.equal(r.provider,'openrouter');assert.equal(r.model,expected);
+ });
+}
+it('preserves slash-containing IDs in explicit provider roles',()=>{
+ const r=resolveWorkerSelection({}, {cwd:'/tmp'},DEFAULT_CONFIG,{provider:'openrouter',model:'@preset/glm53'});
+ assert.equal(r.provider,'openrouter');assert.equal(r.model,'@preset/glm53');
+});
+it('does not strip a provider-owned model namespace even when it matches the provider name',()=>{
+ const r=resolveWorkerSelection({provider:'openrouter',model:'openrouter/auto'},{cwd:'/tmp'},DEFAULT_CONFIG,undefined);
+ assert.equal(r.model,'openrouter/auto');
+});
+it('prefers an exact model ID in the inherited provider catalog over prefix interpretation',()=>{
+ const parent={cwd:'/tmp',provider:'openrouter',models:[{provider:'openrouter',id:'z-ai/glm-5'},{provider:'openrouter',id:'openai/gpt-5'}]};
+ for(const model of ['z-ai/glm-5','openai/gpt-5']) {
+  const r=resolveWorkerSelection({model},parent,DEFAULT_CONFIG,undefined);
+  assert.equal(r.provider,'openrouter');assert.equal(r.model,model);
+ }
 });

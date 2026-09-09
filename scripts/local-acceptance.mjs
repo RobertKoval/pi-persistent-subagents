@@ -10,7 +10,7 @@ import { execFileSync } from 'node:child_process';
 const root = resolve(import.meta.dirname, '..');
 const work = await mkdtemp(join(tmpdir(), 'pi-live-'));
 await mkdir(join(work, '.pi'));
-await writeFile(join(work, '.pi/persistent-subagents.json'), JSON.stringify({ notifyOnSettled: process.argv.includes('--manager') || process.argv.includes('--wake') }));
+await writeFile(join(work, '.pi/persistent-subagents.json'), JSON.stringify({ notifyOnSettled: process.argv.includes('--manager') || process.argv.includes('--wake') || process.argv.includes('--dedup') }));
 const accountsExtension = process.env.PI_TEST_ACCOUNTS_EXTENSION ?? join(process.env.PI_CODING_AGENT_DIR || join(homedir(), '.pi', 'agent'), 'npm/node_modules/@narumitw/pi-accounts');
 const accountArgs = existsSync(accountsExtension) ? ['-e', accountsExtension] : [];
 const client = new PersistentPiRpcClient({ command: 'pi', args: ['--no-extensions', ...accountArgs, '-e', join(root, 'test/fakes/probe-extension.ts'), '--mode', 'rpc', '--session', join(work, 'parent.jsonl'), '--provider', 'openai-codex', '--model', process.argv.includes('--manager') ? 'gpt-5.6-terra' : 'gpt-5.6-luna', '--thinking', 'low', '--offline', '--no-context-files', '--approve'], cwd: work, startupTimeoutMs: 30000, commandTimeoutMs: 120000, shutdownGraceMs: 10000 });
@@ -38,7 +38,22 @@ try {
  const inspection = await probe('inspect');
  console.log(JSON.stringify({ stage: 'inspect', ...inspection, selected: undefined, accountSelectionCount: Object.keys(inspection.selected ?? {}).length }));
  const signal = process.argv.find(a => ['SIGTERM','SIGHUP','SIGKILL'].includes(a));
- if(process.argv.includes('--wake')) {
+ if(process.argv.includes('--dedup')) {
+   let notifications=0;let settled=0;let waited=false;
+   const off=client.onEvent(e=>{
+     if(e.type==='message_end'&&e.message?.customType==='persistent-subagent-notification')notifications++;
+     if(e.type==='agent_settled')settled++;
+     if(e.type==='tool_execution_end'&&e.toolName==='wait_agent')waited=true;
+   });
+   await client.prompt('Acceptance test: spawn exactly one gpt-5.6-luna worker at low thinking, task: Reply exactly WORKER_RESULT_739. Immediately call wait_agent for that worker and inspect its result. Then reply exactly MANAGER_FINISHED_739 and end. Do not spawn any other worker, do not close it, and do not use bash or other tools.');
+   await client.waitForIdle(120000);
+   await new Promise(r=>setTimeout(r,300));
+   off();
+   assert.ok(waited);assert.equal(settled,1,'consumed result must not trigger another manager run');
+   assert.equal(notifications,0,'result returned by wait_agent must not be notified again');
+   assert.match(await client.getLastAssistantText(),/MANAGER_FINISHED_739/);
+   console.log(JSON.stringify({stage:'consumed-result',managerRuns:settled,notifications,waited}));
+ } else if(process.argv.includes('--wake')) {
    let settled=0;
    let completed=false;
    let waited=false;

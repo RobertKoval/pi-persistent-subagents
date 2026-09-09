@@ -78,6 +78,7 @@ function complete(message, prefix = 'ECHO') {
   isStreaming = false;
   write({ type: 'agent_end', messages: [] });
   write({ type: 'agent_settled' });
+  if (message === '__DUPLICATE_SETTLED__') write({type:'agent_settled'});
 }
 
 function startTurn(message, prefix = 'ECHO', delay = 15) {

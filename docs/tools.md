@@ -30,7 +30,7 @@ Model-visible tool results use [TOON](https://github.com/toon-format/toon). Pi R
 - `send_input` acknowledges with `id`, `status`, `pid` and an error if present. It does not repeat output, paths or usage.
 - `spawn_agent` also reports the selected provider/model; `resume_agent` adds cache continuity.
 - `list_agents` returns a compact table of ID, name/role, state, PID, model and error. It does not fetch worker output.
-- `wait_agent` returns timeout state and each selected worker's ID, state, error and full latest output.
+- `wait_agent` returns timeout state and each selected worker's ID, state, result_id, error and full latest output.
 - `verbose: true` on list/wait adds the full metadata, session path, usage and latest output for diagnostics.
 
 `idle` means the run has settled: check `error` and the output before interpreting it as success. Multiline output and special characters are encoded by the TOON library without truncation.
@@ -41,4 +41,14 @@ Model-visible tool results use [TOON](https://github.com/toon-format/toon). Pi R
 
 Thinking levels: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. Availability depends on the model.
 
-Completion notifications are short wake-up signals without worker output. They start a turn when the manager is idle, or queue a follow-up when it is busy. Set notifyOnSettled:false to disable automatic continuation. Use `wait_agent` with the notified ID to fetch the result on demand.
+Completion notifications are short wake-up signals without worker output. They wait in the extension while the manager is busy and start a turn only for unread, unannounced results once it is idle. Set notifyOnSettled:false to disable automatic continuation. Use `wait_agent` with the notified ID to fetch the result on demand.
+
+## Result identity and delivery
+
+Each completed run has a `result_id`. Repeated transport settlement does not create a new completion, but two distinct runs with identical output have different IDs. Starting new work clears the current result ID; it does not mutate unread completed snapshots.
+
+`wait_agent` returns the current state/result and, when needed, `additional_results` containing older unread completion snapshots. These are historical results, not additional live workers. Only returned results are marked read. `list_agents(verbose:true)` marks its displayed current completed result as read; compact listing does not consume results.
+
+Read means delivered to the manager, not accepted as correct. The extension does not choose retries, reviewers or models. Repeating an explicit wait remains possible; automatic notifications are not repeated for a result that was already returned.
+
+The unread inbox is scoped to the live parent extension instance. The latest result ID is persisted for close/resume; all worker transcripts remain in Pi sessions. Reload still terminates workers and clears the in-memory inbox, so retrieve pending results before reloading when you need the historical copies through this API.

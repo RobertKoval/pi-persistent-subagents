@@ -1,5 +1,5 @@
 import { access, mkdir } from 'node:fs/promises';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import type { PersistentSubagentConfig } from './config.ts';
 import { PersistentPiRpcClient, type RpcEvent } from './rpc-client.ts';
@@ -443,6 +443,7 @@ export class WorkerPool {
 
   private handleEvent(worker: ManagedWorker, event: RpcEvent): void {
     if (event.type === 'agent_start') {
+      worker.record.completionId = undefined;
       worker.error = undefined;
       worker.record.lastOutput = null;
       worker.record.status = 'running';
@@ -474,6 +475,8 @@ export class WorkerPool {
     }
 
     if (event.type === 'agent_settled') {
+      if (worker.intentionallyClosing || worker.record.status !== 'running') return;
+      worker.record.completionId = randomUUID();
       worker.record.status = 'idle';
       worker.record.cacheContinuity = 'warm_process';
       worker.record.updatedAt = Date.now();

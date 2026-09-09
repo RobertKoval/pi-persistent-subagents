@@ -9,6 +9,7 @@ export interface WorkerSelectionInput {
 }
 
 export interface ParentSelection {
+  models?: readonly {provider: string; id: string}[];
   provider?: string;
   model?: string;
   thinking?: string;
@@ -28,8 +29,9 @@ export function resolveWorkerSelection(
   config: PersistentSubagentConfig,
   role: RoleConfig | undefined,
 ): ResolvedWorkerSelection {
-  const explicitModel = parseModelRef(input.model);
-  const roleModel = parseModelRef(role?.model);
+  const inheritedProvider = config.inheritParentProvider ? clean(parent.provider) : undefined;
+  const roleModel = parseModelRef(role?.model, clean(role?.provider), inheritedProvider, parent.models);
+  const explicitModel = parseModelRef(input.model, clean(input.provider), clean(role?.provider) ?? roleModel.provider ?? inheritedProvider, parent.models);
 
   const provider = clean(input.provider)
     ?? explicitModel.provider
@@ -53,12 +55,30 @@ export function resolveWorkerSelection(
   };
 }
 
-function parseModelRef(value: string | undefined): { provider?: string; model?: string } {
+function parseModelRef(
+  value: string | undefined,
+  provider?: string,
+  inheritedProvider?: string,
+  models: ParentSelection['models'] = [],
+): { provider?: string; model?: string } {
   const normalized = clean(value);
   if (!normalized) return {};
+  const selectedProvider = provider ?? inheritedProvider;
+  const known = (id: string) => models.some(m => m.provider === selectedProvider && m.id === id);
+  if (known(normalized)) return {model: normalized};
+  if (provider) {
+    const prefix = `${provider}/`;
+    const suffix = normalized.startsWith(prefix) ? normalized.slice(prefix.length) : undefined;
+    // Strip a redundant prefix only when its meaning is established.
+    if (suffix && (known(suffix) || suffix.startsWith('@preset/'))) return {model:suffix};
+    return {model: normalized};
+  }
+  if (normalized.startsWith('@')) return { model: normalized };
   const slash = normalized.indexOf('/');
   if (slash <= 0 || slash === normalized.length - 1) return { model: normalized };
-  return { provider: normalized.slice(0, slash), model: normalized.slice(slash + 1) };
+  const prefix = normalized.slice(0, slash);
+  if (models.length && !models.some(m => m.provider === prefix)) return {model: normalized};
+  return { provider: prefix, model: normalized.slice(slash + 1) };
 }
 
 function clean(value: string | undefined): string | undefined {

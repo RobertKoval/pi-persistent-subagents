@@ -23,7 +23,8 @@ async function harness(depth = 0) {
   const notifications: any[] = [];
   let entries: any[] = [];
   let active: string[] | undefined;
-  const ctx: any = { cwd: root, model: { provider: 'openai-codex', id: 'fake' }, thinkingLevel: 'low',
+  let idle = true;
+  const ctx: any = { isIdle: () => idle, hasPendingMessages: () => false, cwd: root, model: { provider: 'openai-codex', id: 'fake' }, thinkingLevel: 'low',
     sessionManager: { getSessionId: () => 'parent', getEntries: () => entries }, ui: { notify() {} } };
   extension({ registerTool: (t: any) => tools.set(t.name, t), registerCommand() {},
     on: (name: string, fn: any) => events.set(name, fn), sendMessage(message: any, options: any) { notifications.push({message,options}); },
@@ -36,7 +37,7 @@ async function harness(depth = 0) {
     await rm(root, { recursive: true, force: true });
   });
   const call = (name: string, params: any) => tools.get(name).execute('test', params, undefined, undefined, ctx);
-  return { notifications, call, start: () => events.get('session_start')({},ctx), active: () => active ?? [...tools.keys()], shutdown: () => events.get('session_shutdown')({},ctx), select(account: string) { entries = [{ type: 'custom', customType: 'pi-accounts-selection', data: { version: 1, sessionId: 'parent', providers: { 'openai-codex': account } } }]; } };
+  return { setIdle(value: boolean) { idle=value; }, notifications, call, start: () => events.get('session_start')({},ctx), active: () => active ?? [...tools.keys()], shutdown: () => events.get('session_shutdown')({},ctx), select(account: string) { entries = [{ type: 'custom', customType: 'pi-accounts-selection', data: { version: 1, sessionId: 'parent', providers: { 'openai-codex': account } } }]; } };
 }
 
 it('lists the same session path exposed by spawn after settling', async () => {
@@ -83,12 +84,12 @@ for (const task of ['PRIVATE_OUTPUT_'.repeat(1000), '__PROVIDER_ERROR__']) {
   it(`sends a short completion signal that wakes the manager without steering (${task === '__PROVIDER_ERROR__' ? 'error' : 'success'}) and keeps results available on demand`, async () => {
     const h = await harness();
     const worker = (await h.call('spawn_agent', {task})).details;
-    await h.call('wait_agent', {ids:[worker.id],timeout_ms:2000});
-    assert.equal(h.notifications.length,1);
+    await eventually(()=>h.notifications.length===1);
     const {message,options} = h.notifications[0];
-    assert.equal(message.content, `Worker ${worker.id}: ${task === '__PROVIDER_ERROR__' ? 'error' : 'idle'}. Use wait_agent for its result.`);
-    assert.deepEqual(options,{triggerTurn:true,deliverAs:'followUp'});
     const result=(await h.call('wait_agent',{ids:[worker.id],timeout_ms:2000})).details.statuses[worker.id];
+    assert.ok(result.completionId);
+    assert.equal(message.content, `Worker ${worker.id}: ${task === '__PROVIDER_ERROR__' ? 'error' : 'idle'} (result ${result.completionId}).\nUse wait_agent for unread results.`);
+    assert.deepEqual(options,{triggerTurn:true});
     if(task==='__PROVIDER_ERROR__') assert.match(result.error,/usage limit/);
     else assert.equal(result.lastOutput,`ECHO:${task}`);
   });
@@ -103,7 +104,7 @@ it('returns compact TOON acknowledgements and lists, with full results and diagn
   const sent=await h.call('send_input',{id:w.id,message:task});
   assert.deepEqual(decode(sent.content[0].text),{id:w.id,status:sent.details.status,pid:w.pid});
   const waited=await h.call('wait_agent',{ids:[w.id],timeout_ms:2000});
-  assert.deepEqual(decode(waited.content[0].text),{timed_out:false,agents:[{id:w.id,status:'idle',error:null,output:`ECHO:${task}`}]});
+  assert.deepEqual(decode(waited.content[0].text),{timed_out:false,agents:[{id:w.id,status:'idle',result_id:waited.details.statuses[w.id].completionId,error:null,output:`ECHO:${task}`}]});
   const list=decode((await h.call('list_agents',{})).content[0].text) as any;
   assert.deepEqual(list,{agents:[{id:w.id,name:'reviewer, "one"\nsecond line',status:'idle',pid:w.pid,model:'openai-codex/worker-model',error:null}]});
   const verbose=decode((await h.call('list_agents',{verbose:true})).content[0].text) as any;
@@ -125,4 +126,58 @@ it('retains provider failures and timeout state in compact wait results', async 
   const result=decode((await h.call('wait_agent',{ids:[w.id],timeout_ms:2000})).content[0].text) as any;
   assert.match(result.agents[0].error,/usage limit/);
   assert.equal(result.agents[0].output,null);
+});
+
+async function eventually(check: () => boolean, timeout = 1500) {
+  const end=Date.now()+timeout;
+  while(!check() && Date.now()<end) await new Promise(r=>setTimeout(r,5));
+  assert.ok(check(),'condition did not become true');
+}
+it('does not queue a wake-up while busy or wake later for a result already read', async () => {
+  const h=await harness(); h.setIdle(false);
+  const w=(await h.call('spawn_agent',{task:'ready'})).details;
+  await h.call('wait_agent',{ids:[w.id],timeout_ms:2000});
+  assert.equal(h.notifications.length,0,'busy manager must not receive a queued follow-up');
+  h.setIdle(true);
+  await new Promise(r=>setTimeout(r,150));
+  assert.equal(h.notifications.length,0,'consumed completion must not wake the manager later');
+});
+it('preserves two completions before a read and batches one idle wake-up', async () => {
+  const h=await harness(); h.setIdle(false);
+  const w=(await h.call('spawn_agent',{task:'first'})).details;
+  async function settle() {
+    for(let i=0;i<200;i++) {
+      const current=(await h.call('list_agents',{})).details[0];
+      if(current.status==='idle')return current;
+      await new Promise(r=>setTimeout(r,5));
+    }
+    assert.fail('worker did not settle');
+  }
+  const first=await settle();
+  await h.call('send_input',{id:w.id,message:'second'});
+  const second=await settle();
+  assert.notEqual(first.completionId,second.completionId);
+  assert.equal(h.notifications.length,0);
+  h.setIdle(true); await eventually(()=>h.notifications.length===1);
+  const read=await h.call('wait_agent',{ids:[w.id],timeout_ms:2000});
+  const body=decode(read.content[0].text) as any;
+  assert.equal(body.agents[0].output,'ECHO:second');
+  assert.equal(body.additional_results[0].output,'ECHO:first');
+  assert.equal(body.additional_results[0].result_id,first.completionId);
+  await new Promise(r=>setTimeout(r,150));
+  assert.equal(h.notifications.length,1);
+});
+it('keeps an unread completed result when newer work is closed and verbose-listed', async () => {
+ const h=await harness();h.setIdle(false);
+ const w=(await h.call('spawn_agent',{task:'unread A'})).details;
+ for(let i=0;i<200;i++) {
+  if((await h.call('list_agents',{})).details[0].status==='idle')break;
+  await new Promise(r=>setTimeout(r,5));
+ }
+ await h.call('send_input',{id:w.id,message:'__SLOW__'});
+ await h.call('close_agent',{id:w.id});
+ await h.call('list_agents',{verbose:true});
+ const read=decode((await h.call('wait_agent',{ids:[w.id],timeout_ms:2000})).content[0].text) as any;
+ assert.equal(read.additional_results?.[0]?.output,'ECHO:unread A');
+ assert.equal(read.agents[0].result_id,null,'unfinished work must not claim the earlier completion ID');
 });

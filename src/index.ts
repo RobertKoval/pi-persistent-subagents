@@ -1,3 +1,4 @@
+import { CompletionInbox } from './completion-inbox.ts';
 import { seedAccountSelection } from './account-selection.ts';
 import { encode } from '@toon-format/toon';
 import { homedir } from 'node:os';
@@ -36,6 +37,7 @@ interface PoolBundle {
   pool: WorkerPool;
   config: PersistentSubagentConfig;
   depth: number;
+  inbox: CompletionInbox;
 }
 
 export default function persistentSubagentsExtension(pi: ExtensionAPI) {
@@ -43,6 +45,7 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
   let bundleSessionId: string | null = null;
 
   const currentParent = (ctx: ExtensionContext) => ({
+    models: ctx.modelRegistry?.getAll().map(({provider, id}) => ({provider, id})),
     provider: ctx.model?.provider,
     model: ctx.model?.id,
     thinking: ctx.thinkingLevel,
@@ -73,27 +76,18 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
     });
     await pool.initialize();
 
-    if (loaded.config.notifyOnSettled) {
-      pool.onSettled((snapshot) => {
-        const content = completionNotification(snapshot);
-        pi.sendMessage(
-          {
-            customType: 'persistent-subagent-notification',
-            content,
-            display: true,
-            details: {
-              agentId: snapshot.id,
-              name: snapshot.name,
-              role: snapshot.role,
-              status: snapshot.status,
-            },
-          },
-          { triggerTurn: true, deliverAs: 'followUp' },
-        );
-      });
-    }
-
-    return { sessionId, pool, config: loaded.config, depth };
+    const inbox = new CompletionInbox({
+      ready: () => ctx.isIdle() && !ctx.hasPendingMessages(),
+      notify: loaded.config.notifyOnSettled,
+      deliver: (snapshots) => pi.sendMessage({
+        customType: 'persistent-subagent-notification',
+        content: completionNotification(snapshots),
+        display: true,
+        details: { completions: snapshots.map(s => ({agentId:s.id,resultId:s.completionId})) },
+      }, { triggerTurn: true }),
+    });
+    pool.onSettled(snapshot => inbox.publish(snapshot));
+    return { sessionId, pool, config: loaded.config, depth, inbox };
   };
 
   const ensurePool = async (ctx: ExtensionContext): Promise<PoolBundle> => {
@@ -101,6 +95,7 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
     if (!bundlePromise || bundleSessionId !== sessionId) {
       if (bundlePromise) {
         const previous = await bundlePromise.catch(() => null);
+        previous?.inbox.dispose();
         await previous?.pool.cleanup().catch(() => undefined);
       }
       bundleSessionId = sessionId;
@@ -124,6 +119,7 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
     bundleSessionId = null;
     if (!current) return;
     const bundle = await current.catch(() => null);
+    bundle?.inbox.dispose();
     await bundle?.pool.cleanup().catch(() => undefined);
   };
 
@@ -203,7 +199,17 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
         timeoutMs: params.timeout_ms ?? 30_000,
         signal,
       });
-      return toolResult(encode({ timed_out: result.timedOut, agents: params.verbose ? simplifySnapshots(Object.values(result.statuses)) : Object.values(result.statuses).map(s => ({id:s.id,status:s.status,error:s.error ?? null,output:s.lastOutput})) }), result);
+      const snapshots = Object.values(result.statuses);
+      const consumed = bundle.inbox.consume(snapshots, true);
+      const additional = consumed.filter(s => {
+        const current = result.statuses[s.id];
+        return current.status !== 'idle' || current.completionId !== s.completionId;
+      });
+      return toolResult(encode({
+        timed_out: result.timedOut,
+        agents: params.verbose ? simplifySnapshots(snapshots) : snapshots.map(resultSummary),
+        ...(additional.length ? {additional_results: additional.map(resultSummary)} : {}),
+      }), {...result, ...(additional.length ? {additionalResults: additional} : {})});
     },
   });
 
@@ -216,6 +222,7 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
     execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
       const bundle = await ensurePool(ctx);
       const agents = bundle.pool.listAgents();
+      if (params.verbose) bundle.inbox.consume(agents, false);
       return toolResult(encode({agents: params.verbose ? simplifySnapshots(agents) : agents.map(s => ({id:s.id,name:s.name ?? s.role ?? null,status:s.status,pid:s.pid ?? null,model:modelLabel(s),error:s.error ?? null}))}), agents);
     },
   });
@@ -311,6 +318,7 @@ function simplifySnapshots(snapshots: WorkerSnapshot[]) {
     session_file: snapshot.sessionFile,
     task: snapshot.taskPreview,
     usage: snapshot.usage,
+    result_id: snapshot.completionId,
     last_output: snapshot.lastOutput,
     error: snapshot.error,
   }));
@@ -325,6 +333,10 @@ function humanAgentList(agents: WorkerSnapshot[]): string {
   }).join('\n');
 }
 
-function completionNotification(snapshot: WorkerSnapshot): string {
-  return `Worker ${snapshot.id}: ${snapshot.error ? 'error' : snapshot.status}. Use wait_agent for its result.`;
+function resultSummary(snapshot: WorkerSnapshot) {
+  return {id:snapshot.id,status:snapshot.status,result_id:snapshot.completionId ?? null,error:snapshot.error ?? null,output:snapshot.lastOutput};
+}
+
+function completionNotification(snapshots: WorkerSnapshot[]): string {
+  return snapshots.map(s => `Worker ${s.id}: ${s.error ? 'error' : s.status} (result ${s.completionId}).`).join('\n') + '\nUse wait_agent for unread results.';
 }

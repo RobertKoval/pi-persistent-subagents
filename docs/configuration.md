@@ -26,7 +26,9 @@ Project settings override global settings. Role maps merge by role name. An inva
 
 ## Selection
 
-Tool arguments override role settings, which override inherited parent values. A `provider/model` model string supplies a provider; an explicit `provider` argument wins over that prefix. `cwd` defaults to the parent's current directory.
+Tool arguments override role settings, which override inherited parent values. With an explicit provider, model IDs are treated as provider-owned strings, including slashes: for example `provider: "openrouter", model: "@preset/glm53"` or `model: "z-ai/glm-5"`.
+
+An exact model ID in the selected provider's catalog takes precedence over interpreting a slash as a provider separator. A redundant matching provider prefix is removed only when the suffix is a known model or preset. Without an explicit provider, recognized `provider/model` shorthand remains available. For an unambiguous route, supply the provider separately. No alternate model is selected on failure. `cwd` defaults to the parent's current directory.
 
 Use exact models from `pi --list-models`. The example in the README assumes those models are available to your account; other providers and models can be configured the same way.
 
@@ -40,4 +42,4 @@ For pi-accounts 0.51, the extension copies only its version-1 named selection me
 
 `maxDepth: 1` allows the manager to spawn workers and hides this extension's lifecycle tools at child depth. Raising the limit does not install the extension into child Pi instances; ensure child extension discovery is configured if you want nested teams.
 
-Completion messages contain only the worker ID and status, with a hint to fetch its result. They carry no output, task text or usage, and wake an idle manager automatically. When the manager is busy, Pi queues them as follow-ups rather than steering its current work. The manager can retrieve the result with `wait_agent` when needed. Set `notifyOnSettled: false` if you prefer explicit polling. Keeping `idleTtlMs: 0` avoids losing process continuity between related tasks.
+Completion messages contain worker IDs, result IDs and status, without output, task text or usage. While the manager is busy, the extension retains pending completions locally instead of inserting follow-ups into Pi’s queue. Once the manager is idle, unread, unannounced completions produce one batched wake-up. A result returned by wait_agent is removed from pending delivery, so an obsolete event cannot wake the manager again. The manager can retrieve the result with `wait_agent` when needed. Set `notifyOnSettled: false` if you prefer explicit polling. Keeping `idleTtlMs: 0` avoids losing process continuity between related tasks.

@@ -20,6 +20,7 @@ stateDiagram-v2
 ## Boundaries
 
 - `index.ts` adapts the Pi extension API, tools and notifications.
+- `completion-inbox.ts` owns unread result snapshots and notification delivery; it does not orchestrate tasks.
 - `pool.ts` owns worker lifecycles and orchestration.
 - `rpc-client.ts` owns processes, request IDs, deadlines and shutdown.
 - `jsonl.ts` handles strict LF framing; Unicode line separators remain valid string content.

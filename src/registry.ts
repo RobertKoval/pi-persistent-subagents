@@ -28,6 +28,7 @@ export interface WorkerRecord {
   lastUsedAt: number;
   taskPreview: string;
   lastOutput: string | null;
+  completionId?: string;
   usage: WorkerUsage;
   cacheContinuity: CacheContinuity;
   depth: number;
@@ -151,6 +152,7 @@ function sanitizeRecord(raw: WorkerRecord): WorkerRecord {
     createdAt: finiteNumber(raw.createdAt, 'createdAt'),
     updatedAt: finiteNumber(raw.updatedAt, 'updatedAt'),
     lastUsedAt: finiteNumber(raw.lastUsedAt, 'lastUsedAt'),
+    ...(optionalString(raw.completionId) ? { completionId: optionalString(raw.completionId) } : {}),
     taskPreview: typeof raw.taskPreview === 'string' ? raw.taskPreview : '',
     lastOutput: raw.lastOutput === null ? null : (typeof raw.lastOutput === 'string' ? raw.lastOutput : null),
     usage: {
