@@ -1,6 +1,6 @@
 {
   "name": "pi-persistent-subagents",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Persistent worker agents for Pi: spawn, steer, reuse and resume live RPC sessions.",
   "type": "module",
   "license": "MIT",
@@ -28,7 +28,8 @@
     "test:live:shutdown": "node scripts/local-acceptance.mjs --shutdown-work SIGTERM && node scripts/local-acceptance.mjs --shutdown-work SIGHUP && node scripts/local-acceptance.mjs --shutdown-work SIGKILL",
     "test:live:wake": "node scripts/local-acceptance.mjs --wake",
     "test:live:dedup": "node scripts/local-acceptance.mjs --dedup",
-    "test:live:metrics": "node scripts/metrics-acceptance.mjs"
+    "test:live:metrics": "node scripts/metrics-acceptance.mjs",
+    "test:live:metrics:coverage": "node scripts/metrics-acceptance.mjs --compaction"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "^0.85.0",

@@ -73,7 +73,7 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
     const metrics = new MetricsAdapter(metricsPath(agentDir),ctx.cwd,sessionId,loaded.config,depth,()=>ctx.ui.notify('persistent-subagents: metrics recording failed; this session has a telemetry gap. Check database permissions and disk space.', 'warning'),inheritedMetricsIdentity(process.env.PI_PERSISTENT_METRICS_IDENTITY));
     const pool = new WorkerPool({
       workerEnv: record => ({PI_PERSISTENT_METRICS_IDENTITY:JSON.stringify(metrics.childIdentity(record))}),
-      observeWorker: (record, workerSession) => metrics.worker(record,workerSession),
+      observeWorker: (record, workerSession, api) => metrics.worker(record,workerSession,api),
       config: loaded.config,
       storageRoot: join(agentDir, 'persistent-subagents'),
       parentSessionId: sessionId,
@@ -303,7 +303,11 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
     }
   });
 
-  const track = async (data: {type:string}, ctx: ExtensionContext) => { (await ensurePool(ctx)).metrics.mainEvent(data); };
+  const track = async (data: {type:string}, ctx: ExtensionContext) => { (await ensurePool(ctx)).metrics.mainEvent(data,{provider:ctx.model?.provider,model:ctx.model?.id,api:ctx.model?.api}); };
+  pi.on('session_before_compact', track);
+  pi.on('session_compact', track);
+  pi.on('session_compact_failed', track);
+  pi.on('agent_settled', track);
   pi.on('agent_start', track);
   pi.on('agent_end', track);
   pi.on('turn_start', track);

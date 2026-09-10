@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { attachStrictJsonlReader, serializeJsonLine } from './jsonl.ts';
 
 export interface RpcState {
-  model?: { provider: string; id: string } | null;
+  model?: { provider: string; id: string; api?: string } | null;
   thinkingLevel?: string;
   isStreaming: boolean;
   isCompacting?: boolean;

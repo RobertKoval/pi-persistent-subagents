@@ -215,3 +215,14 @@ it('toggles tracking without killing workers and persists the setting',async()=>
   await h.shutdown();const s=new MetricsStore(join(h.root,'persistent-subagents','metrics.sqlite'));
   assert.equal(s.report({from:0,to:Date.now()+1000}).calls.length,1);s.close();
 });
+
+for(const enabled of [false,true])it(`records main compactions only with tracking enabled=${enabled}`,async()=>{
+  const h=await harness(0,{metricsWorkers:false,metricsMain:enabled});await h.start();
+  await h.event({type:'session_before_compact',reason:'manual'});
+  await h.event({type:'session_compact',reason:'manual',fromExtension:false,compactionEntry:{id:'compact1',usage:{input:5,output:3,cacheRead:2,cacheWrite:0},summary:'PRIVATE_SUMMARY'}});
+  await h.shutdown();const path=join(h.root,'persistent-subagents','metrics.sqlite');
+  if(!enabled){assert.equal(existsSync(path),false);return;}
+  const s=new MetricsStore(path);const r=s.report({from:0,to:Date.now()+1000});s.close();
+  assert.equal(r.compactions.length,1);assert.equal(r.compactions[0].usage.output,3);
+  assert.doesNotMatch(await readFile(path,'utf8'),/PRIVATE_SUMMARY/);
+});

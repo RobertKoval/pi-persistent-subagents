@@ -36,7 +36,7 @@ export interface WorkerPoolOptions {
   env: NodeJS.ProcessEnv;
   invocationFactory: PiInvocationFactory;
   workerEnv?: (record: WorkerRecord) => NodeJS.ProcessEnv;
-  observeWorker?: (record: WorkerRecord, sessionId?: string) => { event(event: RpcEvent): void; close(): void };
+  observeWorker?: (record: WorkerRecord, sessionId?: string, api?: string) => { event(event: RpcEvent): void; close(): void };
 }
 
 export interface SpawnAgentInput extends WorkerSelectionInput {
@@ -439,7 +439,7 @@ export class WorkerPool {
 
     try {
       const state = await client.start();
-      worker.metrics = this.observeWorker?.(record, state.sessionId);
+      worker.metrics = this.observeWorker?.(record, state.sessionId, state.model?.api);
       if (state.model && typeof state.model === 'object') {
         worker.record.provider = state.model.provider ?? worker.record.provider;
         worker.record.model = state.model.id ?? worker.record.model;

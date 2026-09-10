@@ -17,23 +17,25 @@ export class MetricsAdapter {
   private path:string;private config:PersistentSubagentConfig;private depth:number;private warn:()=>void;
   private database(){return this.store??=new MetricsStore(this.path);}
   private enabled(role:'main'|'worker'){return role==='main'?this.depth===0&&this.config.metricsMain:this.config.metricsWorkers;}
-  private observe(identity:MetricIdentity,event:any){
+  private observe(identity:MetricIdentity,event:any,model?:{provider?:string;model?:string;api?:string}){
+    if(event.type==='agent_end')return; // Pi emits agent_settled after retries/compaction, unlike individual runs.
     if(this.failed||!this.enabled(identity.role))return;
     try {
       let recorder=this.recorders.get(identity.worker_id);
       if(!recorder){
         this.database().actor(this.main);
         recorder=new MetricsRecorder(this.database(),identity,Date.now,{parentTaskId:()=>identity.role==='worker'?this.parentTask:null,taskId:()=>identity.role==='main'?this.parentTask:null});
+        if(model)recorder.event({type:'metrics_selection',metricsModel:model});
         this.recorders.set(identity.worker_id,recorder);
       }
       recorder.event(event);
     } catch { this.failed=true;this.warn(); }
   }
-  mainEvent(event:any){
+  mainEvent(event:any,model?:{provider?:string;model?:string;api?:string}){
     if(event.type==='agent_start')this.parentTask??=randomUUID();
-    if(this.depth===0)this.observe(this.main,event);
+    if(this.depth===0)this.observe(this.main,event.type==='session_before_compact'?{...event,metricsModel:model}:event,model);
     this.parentTask=this.recorders.get(this.main.worker_id)?.taskId??this.parentTask;
-    if(event.type==='agent_end')this.parentTask=null;
+    if(event.type==='agent_settled')this.parentTask=null;
   }
   childIdentity(record:WorkerRecord, sessionId?:string):MetricIdentity{
     const identity=metricsIdentity(record.cwd,this.main.session_id,record.id);
@@ -41,9 +43,9 @@ export class MetricsAdapter {
     identity.session_id=metricId('session',sessionId??metricId('worker-session',this.main.session_id,record.id));
     return identity;
   }
-  worker(record:WorkerRecord,sessionId?:string){
+  worker(record:WorkerRecord,sessionId?:string,api?:string){
     const identity=this.childIdentity(record,sessionId);
-    return {event:(event:any)=>this.observe(identity,event),close:()=>this.closeRecorder(identity.worker_id)};
+    return {event:(event:any)=>this.observe(identity,event,{provider:record.provider,model:record.model,api}),close:()=>this.closeRecorder(identity.worker_id)};
   }
   setTracking(role:'main'|'worker',enabled:boolean){
     if(role==='main')this.config.metricsMain=enabled;else this.config.metricsWorkers=enabled;

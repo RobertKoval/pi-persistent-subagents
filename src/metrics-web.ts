@@ -37,10 +37,10 @@ export async function startMetricsPanel(path:string,settings:PanelSettings):Prom
       for(const k of ['project','worker','session','provider','model'] as const)filter[k]=url.searchParams.get(k)||undefined;
       const report=store.report(filter);
       if(url.pathname==='/export.csv'){
-        res.setHeader('Content-Disposition','attachment; filename="pi-metrics-calls.csv"');
-        const fields=['project_id','session_id','worker_id','parent_worker_id','task_id','role','provider','model','start_ms','end_ms','status','input','output','cacheRead','cacheWrite','reasoning','model_ms','stream_ms','observed_tps','api_equivalent','tariff_source','price_timestamp_ms'];
+        res.setHeader('Content-Disposition','attachment; filename="pi-metrics-usage.csv"');
+        const fields=['project_id','session_id','worker_id','parent_worker_id','task_id','role','provider','model','start_ms','end_ms','status','operation','operation_ms','cache_hit_ratio','input','output','cacheRead','cacheWrite','reasoning','model_ms','stream_ms','observed_tps','api_equivalent','tariff_source','price_timestamp_ms'];
         const escape=(v:unknown)=>{let s=v==null?'':String(v);if(/^[=+\-@\t\r]/.test(s))s="'"+s;return '"'+s.replaceAll('"','""')+'"';};
-        const rows=report.calls.map(c=>({...c,...c.usage,api_equivalent:c.price?.total,tariff_source:c.price?.source,price_timestamp_ms:c.price?.timestamp_ms}));
+        const rows=[...report.calls,...report.compactions].map(c=>({...c,operation:c.operation??'assistant',...c.usage,api_equivalent:c.price?.total,tariff_source:c.price?.source,price_timestamp_ms:c.price?.timestamp_ms}));
         send(200,[fields.map(escape).join(','),...rows.map(r=>fields.map(k=>escape(r[k])).join(','))].join('\r\n'),'text/csv; charset=utf-8');return;
       }
       if(url.pathname==='/export.json')res.setHeader('Content-Disposition','attachment; filename="pi-metrics.json"');
