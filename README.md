@@ -92,6 +92,12 @@ Roles inherit the parent's provider unless overridden. With [pi-accounts](https:
 
 [All settings and precedence →](docs/configuration.md)
 
+## Local usage and capacity reports
+
+Run `/pmetrics` for a local dashboard with per-project/day usage, observed stream throughput, task timings, concurrency and immutable API-equivalent cost estimates. Export JSON or CSV. Worker tracking defaults on; main-agent tracking defaults off; both have independent switches.
+
+The shared SQLite database contains metrics only, without prompts, responses or tool arguments. [Measurement methods and limitations →](docs/metrics.md)
+
 ## Practical boundaries
 
 Workers have the same OS permissions as Pi and share a working directory unless you override `cwd`. There is no automatic sandbox or Git worktree isolation. Coordinate edits to shared files.

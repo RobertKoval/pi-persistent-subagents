@@ -1,3 +1,6 @@
+import { startMetricsPanel, type MetricsPanel } from './metrics-web.ts';
+import { saveMetricsSetting } from './metrics-settings.ts';
+import { MetricsAdapter, inheritedMetricsIdentity } from './metrics-adapter.ts';
 import { CompletionInbox } from './completion-inbox.ts';
 import { seedAccountSelection } from './account-selection.ts';
 import { encode } from '@toon-format/toon';
@@ -38,6 +41,8 @@ interface PoolBundle {
   config: PersistentSubagentConfig;
   depth: number;
   inbox: CompletionInbox;
+  metrics: MetricsAdapter;
+  panel?: MetricsPanel;
 }
 
 export default function persistentSubagentsExtension(pi: ExtensionAPI) {
@@ -65,7 +70,10 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
       return { ...resolved, cwd: spec.cwd, env: spec.env };
     };
 
+    const metrics = new MetricsAdapter(metricsPath(agentDir),ctx.cwd,sessionId,loaded.config,depth,()=>ctx.ui.notify('persistent-subagents: metrics recording failed; this session has a telemetry gap. Check database permissions and disk space.', 'warning'),inheritedMetricsIdentity(process.env.PI_PERSISTENT_METRICS_IDENTITY));
     const pool = new WorkerPool({
+      workerEnv: record => ({PI_PERSISTENT_METRICS_IDENTITY:JSON.stringify(metrics.childIdentity(record))}),
+      observeWorker: (record, workerSession) => metrics.worker(record,workerSession),
       config: loaded.config,
       storageRoot: join(agentDir, 'persistent-subagents'),
       parentSessionId: sessionId,
@@ -87,7 +95,7 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
       }, { triggerTurn: true }),
     });
     pool.onSettled(snapshot => inbox.publish(snapshot));
-    return { sessionId, pool, config: loaded.config, depth, inbox };
+    return { sessionId, pool, config: loaded.config, depth, inbox, metrics };
   };
 
   const ensurePool = async (ctx: ExtensionContext): Promise<PoolBundle> => {
@@ -97,6 +105,8 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
         const previous = await bundlePromise.catch(() => null);
         previous?.inbox.dispose();
         await previous?.pool.cleanup().catch(() => undefined);
+        previous?.metrics.close();
+        await previous?.panel?.close();
       }
       bundleSessionId = sessionId;
       bundlePromise = createBundle(ctx);
@@ -121,6 +131,8 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
     const bundle = await current.catch(() => null);
     bundle?.inbox.dispose();
     await bundle?.pool.cleanup().catch(() => undefined);
+    bundle?.metrics.close();
+    await bundle?.panel?.close();
   };
 
   pi.registerTool({
@@ -251,6 +263,29 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand('pmetrics', {
+    description: 'Open local usage/capacity report; pmetrics workers|main on|off changes tracking',
+    handler: async (args, ctx) => {
+      const bundle = await ensurePool(ctx);
+      const setTracking = async (role:'workers'|'main', enabled:boolean) => {
+        await saveMetricsSetting(ctx.cwd,role,enabled);
+        bundle.metrics.setTracking(role==='workers'?'worker':'main',enabled);
+      };
+      const parts=args.trim().split(/\s+/);
+      if(args.trim()){
+        if(parts.length!==2||!['workers','main'].includes(parts[0])||!['on','off'].includes(parts[1])){
+          ctx.ui.notify('Usage: /pmetrics [workers|main on|off]','warning');return;
+        }
+        await setTracking(parts[0] as 'workers'|'main',parts[1]==='on');
+        ctx.ui.notify(`${parts[0]} metrics ${parts[1]}; saved for this project. Other running Pi sessions retain their settings.`,'info');return;
+      }
+      bundle.panel ??= await startMetricsPanel(metricsPath(getAgentDir()),{
+        getSettings:()=>({workers:bundle.config.metricsWorkers,main:bundle.config.metricsMain}),setTracking,
+      });
+      ctx.ui.notify(`Metrics dashboard: ${bundle.panel.url}`,'info');
+    },
+  });
+
   pi.registerCommand('pworkers', {
     description: 'Show persistent worker processes and resumable sessions',
     handler: async (_args, ctx) => {
@@ -267,6 +302,16 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
       pi.setActiveTools(active);
     }
   });
+
+  const track = async (data: {type:string}, ctx: ExtensionContext) => { (await ensurePool(ctx)).metrics.mainEvent(data); };
+  pi.on('agent_start', track);
+  pi.on('agent_end', track);
+  pi.on('turn_start', track);
+  pi.on('message_start', track);
+  pi.on('message_update', track);
+  pi.on('message_end', track);
+  pi.on('tool_execution_start', track);
+  pi.on('tool_execution_end', track);
 
   pi.on('session_shutdown', async () => {
     await cleanupCurrent();
@@ -339,4 +384,8 @@ function resultSummary(snapshot: WorkerSnapshot) {
 
 function completionNotification(snapshots: WorkerSnapshot[]): string {
   return snapshots.map(s => `Worker ${s.id}: ${s.error ? 'error' : s.status} (result ${s.completionId}).`).join('\n') + '\nUse wait_agent for unread results.';
+}
+
+function metricsPath(agentDir:string):string {
+  return process.env.PI_PERSISTENT_SUBAGENTS_METRICS_DB || join(agentDir,'persistent-subagents','metrics.sqlite');
 }

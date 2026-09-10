@@ -11,6 +11,8 @@ Project settings override global settings. Role maps merge by role name. An inva
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
+| `metricsWorkers` | `true` | Record this extension’s workers in shared local SQLite. |
+| `metricsMain` | `false` | Also record the main Pi agent. Independent of worker tracking. |
 | `maxAgents` | `6` | Maximum live workers, including idle workers. |
 | `maxDepth` | `1` | Maximum worker generation. Root is depth 0. |
 | `idleTtlMs` | `0` | Auto-close after this idle duration; 0 disables expiry. |
@@ -43,3 +45,7 @@ For pi-accounts 0.51, the extension copies only its version-1 named selection me
 `maxDepth: 1` allows the manager to spawn workers and hides this extension's lifecycle tools at child depth. Raising the limit does not install the extension into child Pi instances; ensure child extension discovery is configured if you want nested teams.
 
 Completion messages contain worker IDs, result IDs and status, without output, task text or usage. While the manager is busy, the extension retains pending completions locally instead of inserting follow-ups into Pi’s queue. Once the manager is idle, unread, unannounced completions produce one batched wake-up. A result returned by wait_agent is removed from pending delivery, so an obsolete event cannot wake the manager again. The manager can retrieve the result with `wait_agent` when needed. Set `notifyOnSettled: false` if you prefer explicit polling. Keeping `idleTtlMs: 0` avoids losing process continuity between related tasks.
+
+## Metrics
+
+Use `/pmetrics` for the local dashboard and independent tracking switches. See [usage, capacity methods, privacy and coverage](metrics.md).

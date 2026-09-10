@@ -35,6 +35,8 @@ export interface WorkerPoolOptions {
   currentDepth: number;
   env: NodeJS.ProcessEnv;
   invocationFactory: PiInvocationFactory;
+  workerEnv?: (record: WorkerRecord) => NodeJS.ProcessEnv;
+  observeWorker?: (record: WorkerRecord, sessionId?: string) => { event(event: RpcEvent): void; close(): void };
 }
 
 export interface SpawnAgentInput extends WorkerSelectionInput {
@@ -60,6 +62,7 @@ interface ManagedWorker {
   idleTimer?: ReturnType<typeof setTimeout>;
   error?: string;
   intentionallyClosing: boolean;
+  metrics?: { event(event: RpcEvent): void; close(): void };
 }
 
 type WorkerListener = (snapshot: WorkerSnapshot) => void;
@@ -72,6 +75,8 @@ export class WorkerPool {
   private readonly currentDepth: number;
   private readonly env: NodeJS.ProcessEnv;
   private readonly invocationFactory: PiInvocationFactory;
+  private readonly workerEnv: WorkerPoolOptions['workerEnv'];
+  private readonly observeWorker: WorkerPoolOptions['observeWorker'];
   private readonly active = new Map<string, ManagedWorker>();
   private readonly updateListeners = new Set<WorkerListener>();
   private readonly settledListeners = new Set<WorkerListener>();
@@ -84,6 +89,8 @@ export class WorkerPool {
   private lifecycleChain: Promise<void> = Promise.resolve();
 
   constructor(options: WorkerPoolOptions) {
+    this.workerEnv = options.workerEnv;
+    this.observeWorker = options.observeWorker;
     this.config = options.config;
     this.storageRoot = options.storageRoot;
     this.parentSessionId = options.parentSessionId;
@@ -197,6 +204,7 @@ export class WorkerPool {
       worker.record.updatedAt = Date.now();
       await this.registry.upsert(worker.record);
       await worker.client.stop().catch(() => undefined);
+      worker.metrics?.close();
       this.active.delete(id);
       this.emitStateChange();
       throw error;
@@ -306,6 +314,7 @@ export class WorkerPool {
     this.clearIdleTimer(worker);
     worker.intentionallyClosing = true;
     await worker.client.stop();
+    worker.metrics?.close();
     worker.record.status = 'closed';
     worker.record.cacheContinuity = 'cold_process';
     worker.record.updatedAt = Date.now();
@@ -387,6 +396,7 @@ export class WorkerPool {
     if (this.shuttingDown) throw new Error('Worker pool is shutting down');
     const env: NodeJS.ProcessEnv = {
       ...this.env,
+      ...this.workerEnv?.(record),
       PI_PERSISTENT_SUBAGENT_DEPTH: String(this.currentDepth + 1),
     };
     const invocation = this.invocationFactory({
@@ -416,6 +426,7 @@ export class WorkerPool {
 
     client.onEvent((event) => this.handleEvent(worker, event));
     client.onExit((error) => {
+      worker.metrics?.close();
       if (worker.intentionallyClosing) return;
       worker.error = error.message;
       worker.record.status = 'crashed';
@@ -428,6 +439,7 @@ export class WorkerPool {
 
     try {
       const state = await client.start();
+      worker.metrics = this.observeWorker?.(record, state.sessionId);
       if (state.model && typeof state.model === 'object') {
         worker.record.provider = state.model.provider ?? worker.record.provider;
         worker.record.model = state.model.id ?? worker.record.model;
@@ -442,6 +454,7 @@ export class WorkerPool {
   }
 
   private handleEvent(worker: ManagedWorker, event: RpcEvent): void {
+    worker.metrics?.event(event);
     if (event.type === 'agent_start') {
       worker.record.completionId = undefined;
       worker.error = undefined;

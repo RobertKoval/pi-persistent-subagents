@@ -1,17 +1,21 @@
 import { afterEach, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import extension from '../src/index.ts';
 import { decode } from '@toon-format/toon';
+import { MetricsStore } from '../src/metrics.ts';
+import { existsSync } from 'node:fs';
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const f of cleanups.splice(0).reverse()) await f(); });
 
-async function harness(depth = 0) {
+async function harness(depth = 0, settings: Record<string, unknown> = {}) {
   const root = await mkdtemp(join(tmpdir(), 'pi-adapter-'));
+  await mkdir(join(root,'persistent-subagents'),{recursive:true});
+  await writeFile(join(root,'persistent-subagents','config.json'),JSON.stringify(settings));
   const oldDir = process.env.PI_CODING_AGENT_DIR;
   const oldScript = process.argv[1];
   const oldDepth = process.env.PI_PERSISTENT_SUBAGENT_DEPTH;
@@ -19,6 +23,7 @@ async function harness(depth = 0) {
   process.env.PI_CODING_AGENT_DIR = root;
   process.argv[1] = fileURLToPath(new URL('./fakes/fake-pi-rpc.mjs', import.meta.url));
   const tools = new Map<string, any>();
+  const commands = new Map<string, any>();
   const events = new Map<string, any>();
   const notifications: any[] = [];
   let entries: any[] = [];
@@ -26,7 +31,7 @@ async function harness(depth = 0) {
   let idle = true;
   const ctx: any = { isIdle: () => idle, hasPendingMessages: () => false, cwd: root, model: { provider: 'openai-codex', id: 'fake' }, thinkingLevel: 'low',
     sessionManager: { getSessionId: () => 'parent', getEntries: () => entries }, ui: { notify() {} } };
-  extension({ registerTool: (t: any) => tools.set(t.name, t), registerCommand() {},
+  extension({ registerTool: (t: any) => tools.set(t.name, t), registerCommand(name:string, command:any) { commands.set(name,command); },
     on: (name: string, fn: any) => events.set(name, fn), sendMessage(message: any, options: any) { notifications.push({message,options}); },
     getActiveTools: () => active ?? [...tools.keys()], setActiveTools(names: string[]) { active = names; } } as any);
   cleanups.push(async () => {
@@ -37,7 +42,7 @@ async function harness(depth = 0) {
     await rm(root, { recursive: true, force: true });
   });
   const call = (name: string, params: any) => tools.get(name).execute('test', params, undefined, undefined, ctx);
-  return { setIdle(value: boolean) { idle=value; }, notifications, call, start: () => events.get('session_start')({},ctx), active: () => active ?? [...tools.keys()], shutdown: () => events.get('session_shutdown')({},ctx), select(account: string) { entries = [{ type: 'custom', customType: 'pi-accounts-selection', data: { version: 1, sessionId: 'parent', providers: { 'openai-codex': account } } }]; } };
+  return { root, command:(args:string)=>commands.get('pmetrics').handler(args,ctx), event: (event:any) => events.get(event.type)?.(event,ctx), setIdle(value: boolean) { idle=value; }, notifications, call, start: () => events.get('session_start')({},ctx), active: () => active ?? [...tools.keys()], shutdown: () => events.get('session_shutdown')({},ctx), select(account: string) { entries = [{ type: 'custom', customType: 'pi-accounts-selection', data: { version: 1, sessionId: 'parent', providers: { 'openai-codex': account } } }]; } };
 }
 
 it('lists the same session path exposed by spawn after settling', async () => {
@@ -180,4 +185,33 @@ it('keeps an unread completed result when newer work is closed and verbose-liste
  const read=decode((await h.call('wait_agent',{ids:[w.id],timeout_ms:2000})).content[0].text) as any;
  assert.equal(read.additional_results?.[0]?.output,'ECHO:unread A');
  assert.equal(read.agents[0].result_id,null,'unfinished work must not claim the earlier completion ID');
+});
+
+for(const trackWorkers of [false,true]) for(const trackMain of [false,true]) {
+  it(`independently configures worker=${trackWorkers} and main=${trackMain} accounting`,async()=>{
+    const h=await harness(0,{metricsWorkers:trackWorkers,metricsMain:trackMain}); await h.start();
+    await h.event({type:'agent_start'});await h.event({type:'turn_start'});
+    const msg={role:'assistant',timestamp:1,provider:'openai',model:'test',stopReason:'stop',usage:{input:1,output:2},content:[{text:'DO_NOT_STORE'}]};
+    await h.event({type:'message_start',message:msg});await h.event({type:'message_end',message:msg});await h.event({type:'agent_end'});
+    const w=(await h.call('spawn_agent',{task:'DO_NOT_STORE'})).details;
+    await h.call('wait_agent',{ids:[w.id],timeout_ms:2000});await h.shutdown();
+    const path=join(h.root,'persistent-subagents','metrics.sqlite');
+    if(!trackWorkers&&!trackMain){assert.equal(existsSync(path),false);return;}
+    const store=new MetricsStore(path);const report=store.report({from:0,to:Date.now()+1000});store.close();
+    assert.equal(report.calls.filter(c=>c.role==='main').length,Number(trackMain));
+    assert.equal(report.calls.filter(c=>c.role==='worker').length,Number(trackWorkers));
+    assert.doesNotMatch(await readFile(path,'utf8'),/DO_NOT_STORE/);
+  });
+}
+
+it('toggles tracking without killing workers and persists the setting',async()=>{
+  const h=await harness(0,{metricsWorkers:false,metricsMain:false});await h.start();
+  const w=(await h.call('spawn_agent',{task:'first'})).details;await h.call('wait_agent',{ids:[w.id],timeout_ms:2000});
+  await h.command('workers on');
+  const second=(await h.call('send_input',{id:w.id,message:'second'})).details;assert.equal(second.pid,w.pid);
+  await h.call('wait_agent',{ids:[w.id],timeout_ms:2000});
+  await h.command('workers off');await h.call('send_input',{id:w.id,message:'third'});await h.call('wait_agent',{ids:[w.id],timeout_ms:2000});
+  assert.equal(JSON.parse(await readFile(join(h.root,'.pi','persistent-subagents.json'),'utf8')).metricsWorkers,false);
+  await h.shutdown();const s=new MetricsStore(join(h.root,'persistent-subagents','metrics.sqlite'));
+  assert.equal(s.report({from:0,to:Date.now()+1000}).calls.length,1);s.close();
 });

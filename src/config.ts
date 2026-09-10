@@ -11,6 +11,8 @@ export interface RoleConfig {
 }
 
 export interface PersistentSubagentConfig {
+  metricsWorkers: boolean;
+  metricsMain: boolean;
   maxAgents: number;
   maxDepth: number;
   idleTtlMs: number;
@@ -26,6 +28,8 @@ export interface PersistentSubagentConfig {
 }
 
 export const DEFAULT_CONFIG: PersistentSubagentConfig = {
+  metricsWorkers: true,
+  metricsMain: false,
   maxAgents: 6,
   maxDepth: 1,
   idleTtlMs: 0,
@@ -48,7 +52,7 @@ export interface LoadedConfig {
 type PartialConfig = Partial<Omit<PersistentSubagentConfig, 'roles'>> & { roles?: Record<string, RoleConfig> };
 
 const TOP_LEVEL_KEYS = new Set<keyof PersistentSubagentConfig>([
-  'maxAgents', 'maxDepth', 'idleTtlMs', 'startupTimeoutMs', 'commandTimeoutMs', 'shutdownGraceMs',
+  'metricsWorkers', 'metricsMain', 'maxAgents', 'maxDepth', 'idleTtlMs', 'startupTimeoutMs', 'commandTimeoutMs', 'shutdownGraceMs',
   'notifyOnSettled', 'notificationMaxChars', 'inheritParentProvider', 'inheritParentModel',
   'inheritParentThinking', 'roles',
 ]);
@@ -98,6 +102,8 @@ function validatePartialConfig(raw: unknown): PartialConfig {
   }
 
   const result: PartialConfig = {};
+  if ('metricsWorkers' in raw) result.metricsWorkers = booleanValue(raw.metricsWorkers, 'metricsWorkers');
+  if ('metricsMain' in raw) result.metricsMain = booleanValue(raw.metricsMain, 'metricsMain');
   if ('maxAgents' in raw) result.maxAgents = integerInRange(raw.maxAgents, 'maxAgents', 1, 64);
   if ('maxDepth' in raw) result.maxDepth = integerInRange(raw.maxDepth, 'maxDepth', 0, 16);
   if ('idleTtlMs' in raw) result.idleTtlMs = integerInRange(raw.idleTtlMs, 'idleTtlMs', 0, 86_400_000);
