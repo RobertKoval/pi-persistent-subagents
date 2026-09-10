@@ -11,7 +11,21 @@ Worker accounting defaults **on**; main-agent accounting defaults **off**. Both 
 /pmetrics main off
 ```
 
-These commands update `.pi/persistent-subagents.json` and take effect immediately in the current Pi, without restarting workers. Other already-running Pi instances retain their settings; future sessions load the saved values. Alternatively set `metricsWorkers` and `metricsMain` in the existing global or project config. Disabling collection retains historical data and does not disable the worker lifecycle registry or its existing usage counters.
+The commands above save project overrides in `.pi/persistent-subagents.json`. To set defaults for **all projects**:
+
+```text
+/pmetrics global workers on
+/pmetrics global main on
+```
+
+Global commands write `<PI_CODING_AGENT_DIR or ~/.pi/agent>/persistent-subagents/config.json`. The dashboard's **Save settings for** selector offers the same project/global choice. Explicit project settings take precedence over global defaults. To remove an override and inherit the global value:
+
+```text
+/pmetrics project workers inherit
+/pmetrics project main inherit
+```
+
+Changes take effect immediately in the current Pi according to that precedence, without restarting workers. Other already-running Pi instances retain their settings; future sessions load the saved values. Alternatively set `metricsWorkers` and `metricsMain` in the existing global or project config. Disabling collection retains historical data and does not disable the worker lifecycle registry or its existing usage counters.
 
 ## Storage and identities
 

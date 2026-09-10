@@ -1,6 +1,6 @@
 {
   "name": "pi-persistent-subagents",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Persistent worker agents for Pi: spawn, steer, reuse and resume live RPC sessions.",
   "type": "module",
   "license": "MIT",

@@ -26,7 +26,8 @@ it('serves a private local panel, filtered JSON/CSV, and validated tracking swit
   const store=new MetricsStore(path),r=new MetricsRecorder(store,metricsIdentity('/p','s','w'));
   r.event({type:'message_end',message:{role:'assistant',timestamp:1,provider:'provider',model:'@preset/test',usage:{input:1,output:2},stopReason:'stop'}});r.close();store.close();
   const settings={workers:true,main:false};
-  const panel=await startMetricsPanel(path,{getSettings:()=>settings,setTracking:async(role,enabled)=>{settings[role]=enabled;}});
+  let savedScope:string|undefined;
+  const panel=await startMetricsPanel(path,{getSettings:()=>settings,setTracking:async(role,enabled,scope)=>{settings[role]=enabled;savedScope=scope;}});
   try {
     const base=new URL(panel.url);assert.equal(base.hostname,'127.0.0.1');
     assert.equal((await fetch(base.origin+'/api')).status,403);
@@ -41,7 +42,10 @@ it('serves a private local panel, filtered JSON/CSV, and validated tracking swit
     const exp=url('/export.csv');exp.searchParams.set('from','0');exp.searchParams.set('to',String(Date.now()+1000));
     const csv=await (await fetch(exp)).text();assert.match(csv,/project_id/);assert.match(csv,/'@preset\/test/);
     const setting=url('/settings');
-    assert.equal((await fetch(setting,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({role:'main',enabled:true})})).status,200);
+    assert.equal((await fetch(setting,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({role:'main',enabled:true,scope:'global'})})).status,200);
+    assert.equal(settings.main,true);
+    assert.equal(savedScope,'global');
+    assert.equal((await fetch(setting,{method:'POST',body:JSON.stringify({role:'main',enabled:false,scope:'invalid'})})).status,400);
     assert.equal(settings.main,true);
     assert.equal((await fetch(setting,{method:'POST',body:JSON.stringify({role:'workers',enabled:'false'})})).status,400);
     assert.equal(settings.workers,true);

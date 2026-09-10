@@ -226,3 +226,18 @@ for(const enabled of [false,true])it(`records main compactions only with trackin
   assert.equal(r.compactions.length,1);assert.equal(r.compactions[0].usage.output,3);
   assert.doesNotMatch(await readFile(path,'utf8'),/PRIVATE_SUMMARY/);
 });
+
+it('applies global defaults live while honoring project overrides and inherit',async()=>{
+  const h=await harness(0,{metricsWorkers:false,metricsMain:false});await h.start();
+  await h.command('global workers on');
+  assert.equal(JSON.parse(await readFile(join(h.root,'persistent-subagents','config.json'),'utf8')).metricsWorkers,true);
+  const w=(await h.call('spawn_agent',{task:'first'})).details;await h.call('wait_agent',{ids:[w.id],timeout_ms:2000});
+  await h.command('project workers off');await h.command('global workers on');
+  await h.call('send_input',{id:w.id,message:'untracked'});await h.call('wait_agent',{ids:[w.id],timeout_ms:2000});
+  await h.command('project workers inherit');
+  const next=(await h.call('send_input',{id:w.id,message:'tracked'})).details;assert.equal(next.pid,w.pid);
+  await h.call('wait_agent',{ids:[w.id],timeout_ms:2000});await h.shutdown();
+  const store=new MetricsStore(join(h.root,'persistent-subagents','metrics.sqlite'));
+  assert.equal(store.report({from:0,to:Date.now()+1000}).calls.length,2);store.close();
+  assert.equal('metricsWorkers' in JSON.parse(await readFile(join(h.root,'.pi','persistent-subagents.json'),'utf8')),false);
+});

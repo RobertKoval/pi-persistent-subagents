@@ -5,7 +5,7 @@ import { MetricsStore, type MetricFilter } from './metrics.ts';
 
 export interface PanelSettings {
   getSettings():{workers:boolean;main:boolean};
-  setTracking(role:'workers'|'main',enabled:boolean):Promise<void>;
+  setTracking(role:'workers'|'main',enabled:boolean,scope?:'project'|'global'):Promise<void>;
 }
 export interface MetricsPanel {url:string;close():Promise<void>}
 export async function startMetricsPanel(path:string,settings:PanelSettings):Promise<MetricsPanel> {
@@ -24,8 +24,8 @@ export async function startMetricsPanel(path:string,settings:PanelSettings):Prom
       if(req.method==='POST'&&url.pathname==='/settings'){
         let body='';for await(const chunk of req){body+=chunk;if(body.length>1024){send(413,'{"error":"Too large"}');return;}}
         const data=JSON.parse(body);
-        if(!data||!['workers','main'].includes(data.role)||typeof data.enabled!=='boolean'||Object.keys(data).some(k=>!['role','enabled'].includes(k))){send(400,'{"error":"Invalid settings"}');return;}
-        await settings.setTracking(data.role,data.enabled);send(200,JSON.stringify(settings.getSettings()));return;
+        if(!data||!['workers','main'].includes(data.role)||typeof data.enabled!=='boolean'||(data.scope!==undefined&&!['project','global'].includes(data.scope))||Object.keys(data).some(k=>!['role','enabled','scope'].includes(k))){send(400,'{"error":"Invalid settings"}');return;}
+        await settings.setTracking(data.role,data.enabled,data.scope??'project');send(200,JSON.stringify(settings.getSettings()));return;
       }
       if(req.method!=='GET'){send(405,'{"error":"Method not allowed"}');return;}
       if(url.pathname==='/'){send(200,html,'text/html; charset=utf-8');return;}

@@ -264,20 +264,24 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand('pmetrics', {
-    description: 'Open local usage/capacity report; pmetrics workers|main on|off changes tracking',
+    description: 'Open metrics; pmetrics [global|project] workers|main on|off|inherit changes tracking',
     handler: async (args, ctx) => {
       const bundle = await ensurePool(ctx);
-      const setTracking = async (role:'workers'|'main', enabled:boolean) => {
-        await saveMetricsSetting(ctx.cwd,role,enabled);
-        bundle.metrics.setTracking(role==='workers'?'worker':'main',enabled);
+      const setTracking = async (role:'workers'|'main', enabled:boolean|null, scope:'project'|'global'='project') => {
+        await saveMetricsSetting(scope==='global'?{scope,agentDir:getAgentDir()}:{scope,cwd:ctx.cwd},role,enabled);
+        const loaded=await loadConfig(ctx.cwd,getAgentDir());
+        for(const warning of loaded.warnings)ctx.ui.notify(warning,'warning');
+        bundle.metrics.setTracking(role==='workers'?'worker':'main',role==='workers'?loaded.config.metricsWorkers:loaded.config.metricsMain);
       };
       const parts=args.trim().split(/\s+/);
       if(args.trim()){
-        if(parts.length!==2||!['workers','main'].includes(parts[0])||!['on','off'].includes(parts[1])){
-          ctx.ui.notify('Usage: /pmetrics [workers|main on|off]','warning');return;
+        const scope=parts[0]==='global'||parts[0]==='project'?parts.shift() as 'global'|'project':'project';
+        if(parts.length!==2||!['workers','main'].includes(parts[0])||!['on','off','inherit'].includes(parts[1])||(scope==='global'&&parts[1]==='inherit')){
+          ctx.ui.notify('Usage: /pmetrics [global|project] workers|main on|off (project also accepts inherit)','warning');return;
         }
-        await setTracking(parts[0] as 'workers'|'main',parts[1]==='on');
-        ctx.ui.notify(`${parts[0]} metrics ${parts[1]}; saved for this project. Other running Pi sessions retain their settings.`,'info');return;
+        await setTracking(parts[0] as 'workers'|'main',parts[1]==='inherit'?null:parts[1]==='on',scope);
+        const effective=parts[0]==='workers'?bundle.config.metricsWorkers:bundle.config.metricsMain;
+        ctx.ui.notify(`${parts[0]} metrics ${parts[1]}; saved ${scope==='global'?'globally (project overrides take precedence)':'for this project'}. Current session: ${effective?'on':'off'}. Other running Pi sessions retain their settings.`,'info');return;
       }
       bundle.panel ??= await startMetricsPanel(metricsPath(getAgentDir()),{
         getSettings:()=>({workers:bundle.config.metricsWorkers,main:bundle.config.metricsMain}),setTracking,
