@@ -48,6 +48,7 @@ export class MetricsAdapter {
     return {event:(event:any)=>this.observe(identity,event,{provider:record.provider,model:record.model,api}),close:()=>this.closeRecorder(identity.worker_id)};
   }
   setTracking(role:'main'|'worker',enabled:boolean){
+    if((role==='main'?this.config.metricsMain:this.config.metricsWorkers)===enabled)return;
     if(role==='main')this.config.metricsMain=enabled;else this.config.metricsWorkers=enabled;
     // Close at toggle time; re-enabling starts a new observation, never backfills an unknown interval.
     for(const [id,recorder] of this.recorders)if((id===this.main.worker_id)===(role==='main')){recorder.close();this.recorders.delete(id);}

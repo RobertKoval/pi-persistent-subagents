@@ -24,3 +24,16 @@ it('connects nested workers to the same recorded parent actor without recording 
     assert.equal(r.actors.filter(a=>a.role==='main').length,1);
   }finally{s.close();rmSync(root,{recursive:true,force:true});}
 });
+
+it('preserves an in-flight call when a settings save leaves effective tracking unchanged',()=>{
+  const root=mkdtempSync(join(tmpdir(),'pi-metrics-noop-')),path=join(root,'m.sqlite');
+  const adapter=new MetricsAdapter(path,root,'parent',{...DEFAULT_CONFIG,metricsWorkers:true},0,()=>assert.fail('metrics error'));
+  try{
+    const worker=adapter.worker({id:'w',cwd:root} as any,'worker-session');
+    const message={role:'assistant',timestamp:1,provider:'p',model:'m',stopReason:'stop',usage:{output:42}};
+    worker.event({type:'agent_start'});worker.event({type:'turn_start'});worker.event({type:'message_start',message});
+    adapter.setTracking('worker',true);
+    worker.event({type:'message_end',message});worker.event({type:'agent_settled'});adapter.close();
+    const s=new MetricsStore(path);try{const calls=s.report({from:0,to:Date.now()+1000}).calls;assert.equal(calls.length,1);assert.equal(calls[0].status,'stop');assert.equal(calls[0].usage.output,42);}finally{s.close();}
+  }finally{adapter.close();rmSync(root,{recursive:true,force:true});}
+});
