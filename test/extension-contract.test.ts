@@ -41,7 +41,7 @@ async function harness(depth = 0, settings: Record<string, unknown> = {}) {
     if (oldDepth === undefined) delete process.env.PI_PERSISTENT_SUBAGENT_DEPTH; else process.env.PI_PERSISTENT_SUBAGENT_DEPTH = oldDepth;
     await rm(root, { recursive: true, force: true });
   });
-  const call = (name: string, params: any) => tools.get(name).execute('test', params, undefined, undefined, ctx);
+  const call = (name: string, params: any, onUpdate?: (value: any) => void) => tools.get(name).execute('test', params, undefined, onUpdate, ctx);
   return { root, command:(args:string)=>commands.get('pmetrics').handler(args,ctx), event: (event:any) => events.get(event.type)?.(event,ctx), setIdle(value: boolean) { idle=value; }, notifications, call, start: () => events.get('session_start')({},ctx), active: () => active ?? [...tools.keys()], shutdown: () => events.get('session_shutdown')({},ctx), select(account: string) { entries = [{ type: 'custom', customType: 'pi-accounts-selection', data: { version: 1, sessionId: 'parent', providers: { 'openai-codex': account } } }]; } };
 }
 
@@ -240,4 +240,38 @@ it('applies global defaults live while honoring project overrides and inherit',a
   const store=new MetricsStore(join(h.root,'persistent-subagents','metrics.sqlite'));
   assert.equal(store.report({from:0,to:Date.now()+1000}).calls.length,2);store.close();
   assert.equal('metricsWorkers' in JSON.parse(await readFile(join(h.root,'.pi','persistent-subagents.json'),'utf8')),false);
+});
+
+
+it('shows wait progress only through UI updates and stops updating after timeout', async () => {
+  const h = await harness();
+  const worker = (await h.call('spawn_agent', {task:'__SLOW__'})).details;
+  const updates: any[] = [];
+  const result = await h.call('wait_agent', {ids:[worker.id], timeout_ms:100}, value => updates.push(value));
+  assert.ok(updates.length > 0, 'waiting must show immediate UI progress');
+  assert.match(updates[0].content[0].text, /Waiting/);
+  assert.match(updates[0].content[0].text, new RegExp(worker.id));
+  assert.match(updates[0].content[0].text, /activity/);
+  assert.equal(result.details.timedOut, true);
+  assert.doesNotMatch(result.content[0].text, /Waiting|activity/);
+  const count = updates.length;
+  await new Promise(resolve => setTimeout(resolve, 1100));
+  assert.equal(updates.length, count, 'finished waits must release their update timer');
+});
+
+
+it('refreshes elapsed wait time and releases the timer when a worker settles', async () => {
+  const h = await harness();
+  const worker = (await h.call('spawn_agent', {task:'__WAIT_UI__'})).details;
+  const updates: any[] = [];
+  const result = await h.call('wait_agent', {ids:[worker.id], timeout_ms:3000}, value => updates.push(value));
+  assert.ok(updates.length >= 2);
+  assert.match(updates[0].content[0].text, /Waiting 0s/);
+  assert.match(updates[1].content[0].text, /Waiting 1s/);
+  assert.equal(result.details.timedOut, false);
+  assert.match(result.content[0].text, /ECHO:__WAIT_UI__/);
+  assert.doesNotMatch(result.content[0].text, /Waiting|activity/);
+  const count = updates.length;
+  await new Promise(resolve => setTimeout(resolve, 1100));
+  assert.equal(updates.length, count);
 });

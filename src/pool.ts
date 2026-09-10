@@ -56,6 +56,7 @@ export interface WaitResult {
 }
 
 interface ManagedWorker {
+  lastActivityAt?: number;
   record: WorkerRecord;
   client: PersistentPiRpcClient;
   commandChain: Promise<void>;
@@ -135,6 +136,10 @@ export class WorkerPool {
   onSettled(listener: WorkerListener): () => void {
     this.settledListeners.add(listener);
     return () => this.settledListeners.delete(listener);
+  }
+
+  getLastActivityAt(id: string): number | undefined {
+    return this.active.get(id)?.lastActivityAt;
   }
 
   getAgent(id: string): WorkerSnapshot | undefined {
@@ -454,6 +459,7 @@ export class WorkerPool {
   }
 
   private handleEvent(worker: ManagedWorker, event: RpcEvent): void {
+    worker.lastActivityAt = Date.now();
     worker.metrics?.event(event);
     if (event.type === 'agent_start') {
       worker.record.completionId = undefined;

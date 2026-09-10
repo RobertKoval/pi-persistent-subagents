@@ -203,14 +203,32 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
       timeout_ms: Type.Optional(Type.Integer({ minimum: 1, maximum: 3_600_000 })),
       verbose: Type.Optional(Type.Boolean({ description: 'Include full diagnostic metadata and usage.' })),
     }),
-    execute: async (_toolCallId, params, signal, _onUpdate, ctx) => {
+    execute: async (_toolCallId, params, signal, onUpdate, ctx) => {
       const bundle = await ensurePool(ctx);
-      const result = await bundle.pool.waitForAgents({
-        ids: params.ids,
-        until: params.until ?? 'any',
-        timeoutMs: params.timeout_ms ?? 30_000,
-        signal,
-      });
+      const started = Date.now();
+      const update = () => {
+        const now = Date.now();
+        const workers = [...new Set(params.ids)].map(id => {
+          const worker = bundle.pool.getAgent(id);
+          const activity = bundle.pool.getLastActivityAt(id);
+          return `${id}: ${worker?.status ?? 'unknown'}; last activity ${activity === undefined ? 'unknown' : `${Math.max(0, Math.floor((now - activity) / 1000))}s ago`}`;
+        });
+        onUpdate?.(toolResult(`Waiting ${Math.max(0, Math.floor((now - started) / 1000))}s\n${workers.join('\n')}`, {}));
+      };
+      // Pi renders partial updates; only the returned result enters model context.
+      update();
+      const timer = onUpdate ? setInterval(update, 1000) : undefined;
+      let result;
+      try {
+        result = await bundle.pool.waitForAgents({
+          ids: params.ids,
+          until: params.until ?? 'any',
+          timeoutMs: params.timeout_ms ?? 30_000,
+          signal,
+        });
+      } finally {
+        clearInterval(timer);
+      }
       const snapshots = Object.values(result.statuses);
       const consumed = bundle.inbox.consume(snapshots, true);
       const additional = consumed.filter(s => {
