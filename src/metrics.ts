@@ -1,3 +1,4 @@
+import { modelTotals } from './metrics-models.ts';
 import { cacheInput, cacheRatio, cacheSemantics } from './metrics-cache.ts';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, realpathSync, chmodSync } from 'node:fs';
@@ -171,7 +172,7 @@ export class MetricsStore {
     const mergedWorkers=[...workerIntervals.values()].flatMap(list=>concurrency(list,filter.from,filter.to).timeline.filter(i=>i.concurrency>0).map(({start,end})=>({start,end})));
     const wall=tasks.reduce((n,t)=>n+(t.wall_ms??0),0),model=tasks.reduce((n,t)=>n+(t.model_ms??0),0);
     return {filter,methodology:{timezone:'UTC',tokens:'completion day; missing usage is not zero',model_time:'observed turn_start to message_end; includes client/provider wait, not server decode',throughput:'output tokens / (last fragment - first fragment), including thinking/tool fragments',concurrency:'time weighted over selected interval; completed observable calls only',worker_hours:'sum of task wall time for workers; excludes idle resident processes',cost:'Pi API-equivalent estimate; immutable per-call snapshot, not a bill',cache_ratio:'cacheRead / (input + cacheRead + cacheWrite) for stamped Pi 0.85 OpenAI/Codex/Anthropic adapters; otherwise N/A',coverage:'assistant attempts and reported compaction usage; compaction intervals are operations, not individual model calls. Worker retry backoff is observable; main backoff and hidden HTTP retries are not'},
-      actors:this.db.prepare('SELECT * FROM metric_actors').all(),calls,compactions,retries,tasks,tools:scoped.filter(r=>r.kind==='tool'&&r.operation!=='retry'),daily,concurrency:concurrent,
+      actors:this.db.prepare('SELECT * FROM metric_actors').all(),calls,compactions,retries,tasks,tools:scoped.filter(r=>r.kind==='tool'&&r.operation!=='retry'),daily,models:modelTotals(calls,compactions),concurrency:concurrent,
       capacity:{output_tokens:allComplete.length&&!allComplete.some(c=>c.usage?.output!==undefined)?null:allComplete.reduce((n,c)=>n+(c.usage?.output??0),0),model_call_hours:daily.reduce((n,g)=>n+g.model_call_ms,0)/3600000,
         generation_duty_cycle:wall>0?model/wall:null,average_concurrency:concurrent.average,peak_concurrency:concurrent.peak,p95_concurrency:concurrent.p95,
         p50_observed_tps:percentile(complete.flatMap(c=>c.observed_tps===null?[]:[c.observed_tps]),.5),p95_observed_tps:percentile(complete.flatMap(c=>c.observed_tps===null?[]:[c.observed_tps]),.95),

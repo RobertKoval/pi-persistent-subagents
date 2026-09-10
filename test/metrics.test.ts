@@ -34,6 +34,7 @@ it('stores per-call raw numeric usage, stream observations, wait/tool spans and 
   f.recorder.event({type:'agent_end'});
   const r=f.store.report({from:1000,to:4000});
   assert.equal(r.calls.length,1); assert.equal(r.calls[0].usage.output,20);
+  assert.equal(r.models[0].model,"test"); assert.equal(r.models[0].output,20); assert.equal(r.models[0].api_equivalent,.34);
   assert.equal(r.calls[0].usage.reasoning,4); assert.equal(r.calls[0].observed_tps,20);
   assert.equal(r.calls[0].model_ms,1300); assert.equal(r.calls[0].ttff_ms,200);
   assert.equal(r.tasks[0].wait_ms,1000); assert.equal(r.tasks[0].model_ms,1300);
