@@ -10,6 +10,7 @@ const getArg = (name) => {
 const sessionFile = getArg('--session');
 const provider = getArg('--provider') ?? 'fake-provider';
 const model = getArg('--model') ?? 'fake-model';
+const api = 'fake-api';
 let thinkingLevel = getArg('--thinking') ?? 'medium';
 const logFile = process.env.FAKE_RPC_LOG;
 let isStreaming = false;
@@ -69,14 +70,20 @@ function performTestFilesystemDirective(message) {
   fs.writeFileSync(target, content);
 }
 
+function assistantMessage(content, extra = {}) {
+  return { role: 'assistant', provider, model, api, content, ...extra };
+}
+
 function complete(message, prefix = 'ECHO') {
   if (message === '__CRASH__') {
     setTimeout(() => process.exit(9), 10);
     return;
   }
   if (message === '__PROVIDER_ERROR__') {
-    write({type:'message_end',message:{role:'assistant',content:[],stopReason:'error',errorMessage:'The usage limit has been reached',usage:{input:0,output:0,cacheRead:0,cacheWrite:0}}});
-    isStreaming=false; write({type:'agent_settled'}); return;
+    write({ type: 'message_end', message: assistantMessage([], { stopReason: 'error', errorMessage: 'The usage limit has been reached', usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }) });
+    isStreaming = false;
+    write({ type: 'agent_settled' });
+    return;
   }
   performTestFilesystemDirective(message);
   let text;
@@ -87,11 +94,11 @@ function complete(message, prefix = 'ECHO') {
   }
   lastAssistantText = text;
   persistTurn(message, text);
-  write({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text }], usage: { input: 10, output: 3, cacheRead: history.length > 1 ? 7 : 0, cacheWrite: 0, totalTokens: 13, cost: { total: 0 } } } });
+  write({ type: 'message_end', message: assistantMessage([{ type: 'text', text }], { usage: { input: 10, output: 3, cacheRead: history.length > 1 ? 7 : 0, cacheWrite: 0, totalTokens: 13, cost: { total: 0 } } }) });
   isStreaming = false;
   write({ type: 'agent_end', messages: [] });
   write({ type: 'agent_settled' });
-  if (message === '__DUPLICATE_SETTLED__') write({type:'agent_settled'});
+  if (message === '__DUPLICATE_SETTLED__') write({ type: 'agent_settled' });
 }
 
 function startTurn(message, prefix = 'ECHO', delay = 15) {
@@ -108,7 +115,7 @@ async function handle(cmd) {
   switch (cmd.type) {
     case 'get_state':
       response(cmd, true, {
-        model: { provider, id: model },
+        model: { provider, id: model, api },
         thinkingLevel,
         isStreaming,
         isCompacting: false,
