@@ -41,6 +41,7 @@ export interface SwarmWorkspaceOps {
 
 export interface SwarmPoolLike {
   onSettled(listener: (snapshot: WorkerSnapshot) => void): () => void;
+  onUpdate(listener: (snapshot: WorkerSnapshot) => void): () => void;
   spawnAgent(input: SpawnAgentInput): Promise<WorkerSnapshot>;
   closeAgent(id: string): Promise<WorkerSnapshot>;
 }
@@ -55,6 +56,7 @@ export interface StartSwarmInput {
   maxCandidates?: number;
   maxActive?: number;
   minCompleted?: number;
+  candidateTimeoutMs?: number;
   acceptanceCommands?: string[];
 }
 
@@ -105,6 +107,7 @@ interface CandidateRecord {
   verification: SwarmCommandResult[];
   summary?: string;
   error?: string;
+  timeoutTimer?: ReturnType<typeof setTimeout>;
 }
 
 interface JobRecord {
@@ -119,6 +122,7 @@ interface JobRecord {
   maxCandidates: number;
   maxActive: number;
   minCompleted: number;
+  candidateTimeoutMs: number;
   acceptanceCommands: string[];
   candidates: CandidateRecord[];
   snapshot?: WorkspaceSnapshot;
@@ -149,6 +153,7 @@ export class SwarmManager {
   private readonly jobs = new Map<string, JobRecord>();
   private readonly workerToCandidate = new Map<string, { jobId: string; candidateId: string }>();
   private readonly unsubscribeSettled: () => void;
+  private readonly unsubscribeUpdate: () => void;
   private chain: Promise<void> = Promise.resolve();
   private disposed = false;
 
@@ -161,6 +166,16 @@ export class SwarmManager {
       if (!owned) return;
       this.enqueue(async () => this.handleSettled(owned.jobId, owned.candidateId, snapshot));
     });
+    this.unsubscribeUpdate = this.pool.onUpdate(snapshot => {
+      if (snapshot.status !== 'crashed') return;
+      const owned = this.workerToCandidate.get(snapshot.id);
+      if (!owned) return;
+      this.enqueue(async () => this.handleWorkerFailure(
+        owned.jobId,
+        owned.candidateId,
+        snapshot.error ? `Worker crashed: ${snapshot.error}` : 'Worker crashed',
+      ));
+    });
   }
 
   start(input: StartSwarmInput): SwarmStatus {
@@ -170,6 +185,7 @@ export class SwarmManager {
     const maxCandidates = integerRange(input.maxCandidates ?? 6, 'maxCandidates', 1, 32);
     const maxActive = integerRange(input.maxActive ?? Math.min(3, maxCandidates), 'maxActive', 1, maxCandidates);
     const minCompleted = integerRange(input.minCompleted ?? Math.min(2, maxCandidates), 'minCompleted', 1, maxCandidates);
+    const candidateTimeoutMs = integerRange(input.candidateTimeoutMs ?? 300_000, 'candidateTimeoutMs', 1, 3_600_000);
     const id = `sw_${randomBytes(4).toString('hex')}`;
     const job: JobRecord = {
       id,
@@ -183,6 +199,7 @@ export class SwarmManager {
       maxCandidates,
       maxActive,
       minCompleted,
+      candidateTimeoutMs,
       acceptanceCommands: (input.acceptanceCommands ?? []).map(command => command.trim()).filter(Boolean),
       candidates: Array.from({ length: maxCandidates }, (_, index) => ({
         id: `c${index + 1}`,
@@ -241,6 +258,7 @@ export class SwarmManager {
     const ids = [...this.jobs.values()].filter(job => !['completed', 'cancelled', 'failed'].includes(job.state)).map(job => job.id);
     for (const id of ids) await this.cancel(id).catch(() => undefined);
     this.unsubscribeSettled();
+    this.unsubscribeUpdate();
     this.disposed = true;
     await this.chain;
   }
@@ -257,6 +275,9 @@ export class SwarmManager {
     } catch (error) {
       job.state = 'failed';
       job.error = message(error);
+      for (const candidate of job.candidates) {
+        if (candidate.status === 'queued' || candidate.status === 'starting') candidate.status = 'cancelled';
+      }
     }
   }
 
@@ -281,14 +302,27 @@ export class SwarmManager {
         candidate.status = 'running';
         this.workerToCandidate.set(worker.id, { jobId: job.id, candidateId: candidate.id });
 
-        // A very fast local worker can settle between prompt acceptance and spawnAgent()
-        // returning. Its onSettled event then arrives before the mapping above exists. The
-        // returned pool snapshot is authoritative, so recover that completion here.
-        if (workerTurnTerminal(worker.status)) {
+        // A very fast local worker can settle or crash between prompt acceptance and
+        // spawnAgent() returning. The returned snapshot is authoritative enough to
+        // recover those terminal states even if the event arrived before the mapping.
+        if (worker.status === 'idle') {
           await this.handleSettled(job.id, candidate.id, worker);
           if (job.state !== 'running') return;
+          continue;
         }
+        if (worker.status === 'crashed' || worker.status === 'closed') {
+          await this.handleWorkerFailure(
+            job.id,
+            candidate.id,
+            worker.error ? `Worker ${worker.status}: ${worker.error}` : `Worker ${worker.status}`,
+          );
+          if (job.state !== 'running') return;
+          continue;
+        }
+
+        this.armCandidateTimeout(job, candidate);
       } catch (error) {
+        this.clearCandidateTimeout(candidate);
         candidate.status = 'rejected';
         candidate.error = `Candidate startup failed: ${message(error)}`;
         if (candidate.worktree) await this.workspace.removeWorktree(job.snapshot, candidate.worktree).catch(() => undefined);
@@ -296,10 +330,29 @@ export class SwarmManager {
     }
   }
 
+  private armCandidateTimeout(job: JobRecord, candidate: CandidateRecord): void {
+    this.clearCandidateTimeout(candidate);
+    candidate.timeoutTimer = setTimeout(() => {
+      this.enqueue(async () => this.handleWorkerFailure(
+        job.id,
+        candidate.id,
+        `Candidate timed out after ${job.candidateTimeoutMs}ms`,
+      ));
+    }, job.candidateTimeoutMs);
+    candidate.timeoutTimer.unref?.();
+  }
+
+  private clearCandidateTimeout(candidate: CandidateRecord): void {
+    if (!candidate.timeoutTimer) return;
+    clearTimeout(candidate.timeoutTimer);
+    candidate.timeoutTimer = undefined;
+  }
+
   private async handleSettled(jobId: string, candidateId: string, snapshot: WorkerSnapshot): Promise<void> {
     const job = this.jobs.get(jobId);
     const candidate = job?.candidates.find(item => item.id === candidateId);
     if (!job || !candidate || candidate.status !== 'running' || !job.snapshot || !candidate.worktree) return;
+    this.clearCandidateTimeout(candidate);
     candidate.status = 'verifying';
     candidate.summary = compact(snapshot.lastOutput ?? '', 1_200) || undefined;
     if (snapshot.error) candidate.error = snapshot.error;
@@ -321,11 +374,7 @@ export class SwarmManager {
       candidate.status = 'rejected';
       candidate.error = `Candidate verification failed: ${message(error)}`;
     } finally {
-      if (candidate.workerId) {
-        this.workerToCandidate.delete(candidate.workerId);
-        await this.pool.closeAgent(candidate.workerId).catch(() => undefined);
-      }
-      await this.workspace.removeWorktree(job.snapshot, candidate.worktree).catch(() => undefined);
+      await this.releaseCandidateRuntime(job, candidate);
     }
 
     if (shouldEarlyStop(job)) {
@@ -336,16 +385,36 @@ export class SwarmManager {
     this.completeIfExhausted(job);
   }
 
+  private async handleWorkerFailure(jobId: string, candidateId: string, reason: string): Promise<void> {
+    const job = this.jobs.get(jobId);
+    const candidate = job?.candidates.find(item => item.id === candidateId);
+    if (!job || !candidate || !['starting', 'running'].includes(candidate.status)) return;
+    this.clearCandidateTimeout(candidate);
+    candidate.status = 'rejected';
+    candidate.error = reason;
+    await this.releaseCandidateRuntime(job, candidate);
+    if (job.state !== 'running') return;
+    await this.fillActive(job);
+    this.completeIfExhausted(job);
+  }
+
+  private async releaseCandidateRuntime(job: JobRecord, candidate: CandidateRecord): Promise<void> {
+    this.clearCandidateTimeout(candidate);
+    if (candidate.workerId) {
+      this.workerToCandidate.delete(candidate.workerId);
+      await this.pool.closeAgent(candidate.workerId).catch(() => undefined);
+    }
+    if (candidate.worktree && job.snapshot) {
+      await this.workspace.removeWorktree(job.snapshot, candidate.worktree).catch(() => undefined);
+    }
+  }
+
   private async finishEarly(job: JobRecord): Promise<void> {
     job.state = 'completed';
     for (const candidate of job.candidates) if (candidate.status === 'queued') candidate.status = 'cancelled';
     for (const candidate of job.candidates.filter(item => ['starting', 'running', 'verifying'].includes(item.status))) {
       candidate.status = 'cancelled';
-      if (candidate.workerId) {
-        this.workerToCandidate.delete(candidate.workerId);
-        await this.pool.closeAgent(candidate.workerId).catch(() => undefined);
-      }
-      if (candidate.worktree && job.snapshot) await this.workspace.removeWorktree(job.snapshot, candidate.worktree).catch(() => undefined);
+      await this.releaseCandidateRuntime(job, candidate);
     }
   }
 
@@ -359,11 +428,7 @@ export class SwarmManager {
     for (const candidate of job.candidates) if (candidate.status === 'queued') candidate.status = 'cancelled';
     for (const candidate of job.candidates.filter(item => ['starting', 'running', 'verifying'].includes(item.status))) {
       candidate.status = 'cancelled';
-      if (candidate.workerId) {
-        this.workerToCandidate.delete(candidate.workerId);
-        await this.pool.closeAgent(candidate.workerId).catch(() => undefined);
-      }
-      if (candidate.worktree && job.snapshot) await this.workspace.removeWorktree(job.snapshot, candidate.worktree).catch(() => undefined);
+      await this.releaseCandidateRuntime(job, candidate);
     }
     job.state = 'cancelled';
   }
@@ -452,10 +517,6 @@ function shouldEarlyStop(job: JobRecord): boolean {
 
 function terminalCandidate(status: SwarmCandidateStatus): boolean {
   return ['verified', 'partial', 'rejected', 'cancelled'].includes(status);
-}
-
-function workerTurnTerminal(status: WorkerSnapshot['status']): boolean {
-  return status === 'idle' || status === 'closed' || status === 'crashed';
 }
 
 function isCollectable(candidate: CandidateRecord): candidate is CandidateRecord & { status: 'verified' | 'partial' | 'rejected' } {
