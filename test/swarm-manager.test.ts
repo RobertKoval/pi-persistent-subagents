@@ -11,6 +11,8 @@ class FakePool {
   private readonly listeners = new Set<(snapshot: WorkerSnapshot) => void>();
   private serial = 0;
 
+  constructor(private readonly settleDuringSpawn = false) {}
+
   onSettled(listener: (snapshot: WorkerSnapshot) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
@@ -19,7 +21,14 @@ class FakePool {
   async spawnAgent(input: SpawnAgentInput): Promise<WorkerSnapshot> {
     const id = `w${++this.serial}`;
     this.spawned.push({ id, input });
-    return snapshot(id, 'running', input.cwd ?? '/workspace');
+    if (!this.settleDuringSpawn) return snapshot(id, 'running', input.cwd ?? '/workspace');
+    const settled = {
+      ...snapshot(id, 'idle', input.cwd ?? '/workspace'),
+      lastOutput: 'settled before spawn returned',
+      completionId: `r-${id}`,
+    };
+    for (const listener of this.listeners) listener(settled);
+    return settled;
   }
 
   async closeAgent(id: string): Promise<WorkerSnapshot> {
@@ -124,6 +133,23 @@ describe('SwarmManager', () => {
     await eventually(() => pool.spawned.length === 2, 'two workers should start after preparation');
     assert.equal(manager.status(started.id).active, 2);
     assert.equal(manager.status(started.id).queued, 2);
+  });
+
+  it('recovers a completion that settles before spawnAgent returns', async () => {
+    const pool = new FakePool(true);
+    const manager = new SwarmManager({ pool, storageRoot: '/storage', workspace: workspaceOps() });
+    managers.push(manager);
+    const job = manager.start({
+      task: 'tiny local fix',
+      cwd: '/repo',
+      maxCandidates: 1,
+      maxActive: 1,
+      minCompleted: 1,
+      acceptanceCommands: ['npm test -- target'],
+    });
+    await eventually(() => manager.status(job.id).state === 'completed', 'fast-settling worker must not leave the job stuck running');
+    assert.equal(manager.status(job.id).verified, 1);
+    assert.equal(manager.collect(job.id).candidates[0]?.summary, 'settled before spawn returned');
   });
 
   it('separates logical width from active concurrency and early-stops after enough verified candidates', async () => {
