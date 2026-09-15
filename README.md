@@ -6,7 +6,7 @@
 
 **Spawn once. Keep the context. Work together.**
 
-Long-lived worker agents for [Pi](https://github.com/earendil-works/pi).<br>
+Long-lived worker agents for [Pi](https://github.com/earendil-works/pi), plus an optional speculative local coding swarm.<br>
 Delegate a task, let the worker settle, then continue in the **same live process**.
 
 [![CI](https://github.com/RobertKoval/pi-persistent-subagents/actions/workflows/ci.yml/badge.svg)](https://github.com/RobertKoval/pi-persistent-subagents/actions/workflows/ci.yml)
@@ -14,7 +14,7 @@ Delegate a task, let the worker settle, then continue in the **same live process
 [![Pi 0.85.x](https://img.shields.io/badge/Pi-0.85.x-7c8aff)](https://github.com/earendil-works/pi)
 [![Node ≥22.19](https://img.shields.io/badge/Node-%E2%89%A522.19-8bc34a)](package.json)
 
-[Quick start](#quick-start) · [Tools](#six-tools-one-workflow) · [Configuration](docs/configuration.md) · [How it works](docs/architecture.md)
+[Quick start](#quick-start) · [Persistent tools](#six-tools-one-workflow) · [Local swarm](#speculative-local-coding-swarm) · [Configuration](docs/configuration.md) · [How it works](docs/architecture.md)
 
 </div>
 
@@ -32,7 +32,7 @@ Persistent processes preserve cache *eligibility*. They do not guarantee cache h
 
 ## Quick start
 
-Requires **Pi 0.85.x** and **Node.js 22.19+**. Authenticate your provider in Pi first.
+Requires **Pi 0.85.x**, **Node.js 22.19+**, and Git for swarm workspace isolation. Authenticate your provider in Pi first.
 
 ```sh
 pi install git:https://github.com/RobertKoval/pi-persistent-subagents
@@ -42,7 +42,7 @@ Start Pi, then ask:
 
 > Create a persistent worker to review this module. When it finishes, ask the same worker to check the tests. Keep it available for follow-up questions.
 
-Use `/pworkers` to see your workers. The model receives the six tools below automatically.
+Use `/pworkers` to see persistent workers. At the root depth the model receives the six persistent-worker tools below plus the high-level `swarm` tool.
 
 To try a local checkout without installing globally:
 
@@ -74,6 +74,31 @@ close_agent ──▶ saved session ── resume_agent ──▶ new PID
 `send_input` modes: `auto` (default), `steer`, `follow_up`, `interrupt`.<br>
 See [the tool reference](docs/tools.md) for parameters and lifecycle details.
 
+## Speculative local coding swarm
+
+The frontier Pi model remains the main orchestrator. The `swarm` tool lets it spend cheap/local inference on several isolated coding attempts while the frontier continues independent work, then collect only compact execution evidence and the best patch candidate.
+
+Configure a cheap/local model explicitly so swarm work cannot silently fall back to your frontier model:
+
+```json
+{
+  "maxAgents": 6,
+  "roles": {
+    "local-swarm": {
+      "provider": "your-local-provider",
+      "model": "your-local-model",
+      "thinking": "low"
+    }
+  }
+}
+```
+
+The single `swarm` tool has `start`, `status`, `collect`, `cancel`, and `apply` actions. `start` is asynchronous; `max_candidates` controls logical search width while `max_active` controls actual concurrent workers. Candidates run in detached Git worktrees from an immutable snapshot of the current dirty repository. Runtime diff capture and acceptance-command exit codes are treated as evidence instead of trusting model claims.
+
+Without `acceptance_commands`, a changed candidate is `partial`, not `verified`. Applying a patch is always explicit, and rejected candidates cannot be applied through the tool.
+
+Use `/pswarms` for a human-readable job view. [Architecture, safety boundary, examples and current limitations →](docs/swarm.md)
+
 ## Choose a small team
 
 Save this as `.pi/persistent-subagents.json` in your project. Use model IDs available to your account:
@@ -98,11 +123,15 @@ Run `/pmetrics` for a local dashboard with per-project/day usage, observed strea
 
 The shared SQLite database contains metrics only, without prompts, responses or tool arguments. [Measurement methods and limitations →](docs/metrics.md)
 
+The current swarm vertical slice does not yet add swarm-specific historical job/candidate fields to this dashboard; see [swarm limitations](docs/swarm.md#v1-limitations).
+
 ## Practical boundaries
 
-Workers have the same OS permissions as Pi and share a working directory unless you override `cwd`. There is no automatic sandbox or Git worktree isolation. Coordinate edits to shared files.
+Persistent workers have the same OS permissions as Pi and share a working directory unless you override `cwd`. Coordinate edits to shared files.
 
-By default, workers do not create another generation of this extension's workers. The depth limit applies to this extension; it does not disable unrelated installed tools. Sessions and results are local data, retained for resume—not automatically deleted on shutdown.
+Swarm candidates use separate Git worktrees, so their repository edits are isolated from one another. **A worktree is not a security sandbox:** local candidates still run with Pi's OS permissions and can access paths/network outside the worktree unless your environment restricts them.
+
+By default, workers do not create another generation of this extension's workers. The depth limit applies to this extension; it does not disable unrelated installed tools. The swarm tool is root-only and is not exposed to its leaf workers. Sessions, results and swarm artifacts are local data—not automatically uploaded by this package.
 
 ## Development
 
