@@ -51,7 +51,7 @@ export interface StartSwarmInput {
   role?: string;
   provider?: string;
   model?: string;
-  thinking?: string;
+  thinking?: SpawnAgentInput['thinking'];
   maxCandidates?: number;
   maxActive?: number;
   minCompleted?: number;
@@ -69,6 +69,12 @@ export interface SwarmStatus {
   error?: string;
 }
 
+export interface CollectedVerification {
+  command: string;
+  passed: boolean;
+  exitCode: number;
+}
+
 export interface CollectedCandidate {
   id: string;
   status: Extract<SwarmCandidateStatus, 'verified' | 'partial' | 'rejected'>;
@@ -76,7 +82,7 @@ export interface CollectedCandidate {
   summary?: string;
   patchPath?: string;
   changedFiles: string[];
-  verification: SwarmCommandResult[];
+  verification: CollectedVerification[];
   error?: string;
 }
 
@@ -109,7 +115,7 @@ interface JobRecord {
   role?: string;
   provider?: string;
   model?: string;
-  thinking?: string;
+  thinking?: SpawnAgentInput['thinking'];
   maxCandidates: number;
   maxActive: number;
   minCompleted: number;
@@ -192,8 +198,7 @@ export class SwarmManager {
   }
 
   status(id: string): SwarmStatus {
-    const job = this.requireJob(id);
-    return statusOf(job);
+    return statusOf(this.requireJob(id));
   }
 
   list(): SwarmStatus[] {
@@ -203,11 +208,7 @@ export class SwarmManager {
   collect(id: string, topK = 1): SwarmCollection {
     const job = this.requireJob(id);
     const limit = integerRange(topK, 'topK', 1, 8);
-    const candidates = job.candidates
-      .filter(isCollectable)
-      .sort(compareCandidates)
-      .slice(0, limit)
-      .map(toCollectedCandidate);
+    const candidates = job.candidates.filter(isCollectable).sort(compareCandidates).slice(0, limit).map(toCollectedCandidate);
     return {
       id: job.id,
       state: job.state,
@@ -226,17 +227,18 @@ export class SwarmManager {
     const job = this.requireJob(id);
     const candidate = candidateId
       ? job.candidates.find(item => item.id === candidateId)
-      : job.candidates.filter(isCollectable).sort(compareCandidates)[0];
-    if (!candidate) return { applied: false, reason: 'No completed candidate is available' };
+      : job.candidates.filter(item => item.status === 'verified' || item.status === 'partial').sort(compareCandidates)[0];
+    if (!candidate) return { applied: false, reason: 'No verified or partial candidate is available' };
+    if (candidate.status !== 'verified' && candidate.status !== 'partial') {
+      return { applied: false, reason: `Candidate ${candidate.id} is ${candidate.status} and is not eligible for apply` };
+    }
     if (!candidate.patchPath) return { applied: false, reason: `Candidate ${candidate.id} has no patch artifact` };
     return this.workspace.applyPatch(job.cwd, candidate.patchPath);
   }
 
   async cleanup(): Promise<void> {
     if (this.disposed) return;
-    const ids = [...this.jobs.values()]
-      .filter(job => !['completed', 'cancelled', 'failed'].includes(job.state))
-      .map(job => job.id);
+    const ids = [...this.jobs.values()].filter(job => !['completed', 'cancelled', 'failed'].includes(job.state)).map(job => job.id);
     for (const id of ids) await this.cancel(id).catch(() => undefined);
     this.unsubscribeSettled();
     this.disposed = true;
@@ -249,7 +251,6 @@ export class SwarmManager {
     try {
       const jobRoot = join(this.storageRoot, job.id);
       job.snapshot = await this.workspace.createSnapshot(job.cwd, jobRoot);
-      if (job.state === 'cancelling' || job.state === 'cancelled') return;
       job.state = 'running';
       await this.fillActive(job);
       this.completeIfExhausted(job);
@@ -329,9 +330,7 @@ export class SwarmManager {
 
   private async finishEarly(job: JobRecord): Promise<void> {
     job.state = 'completed';
-    for (const candidate of job.candidates) {
-      if (candidate.status === 'queued') candidate.status = 'cancelled';
-    }
+    for (const candidate of job.candidates) if (candidate.status === 'queued') candidate.status = 'cancelled';
     for (const candidate of job.candidates.filter(item => ['starting', 'running', 'verifying'].includes(item.status))) {
       candidate.status = 'cancelled';
       if (candidate.workerId) {
@@ -343,16 +342,13 @@ export class SwarmManager {
   }
 
   private completeIfExhausted(job: JobRecord): void {
-    if (job.state !== 'running') return;
-    if (job.candidates.every(item => terminalCandidate(item.status))) job.state = 'completed';
+    if (job.state === 'running' && job.candidates.every(item => terminalCandidate(item.status))) job.state = 'completed';
   }
 
   private async cancelJob(job: JobRecord): Promise<void> {
     if (['completed', 'cancelled', 'failed'].includes(job.state)) return;
     job.state = 'cancelling';
-    for (const candidate of job.candidates) {
-      if (candidate.status === 'queued') candidate.status = 'cancelled';
-    }
+    for (const candidate of job.candidates) if (candidate.status === 'queued') candidate.status = 'cancelled';
     for (const candidate of job.candidates.filter(item => ['starting', 'running', 'verifying'].includes(item.status))) {
       candidate.status = 'cancelled';
       if (candidate.workerId) {
@@ -443,8 +439,7 @@ function activeCount(job: JobRecord): number {
 }
 
 function shouldEarlyStop(job: JobRecord): boolean {
-  const completed = job.candidates.filter(isCollectable).length;
-  return completed >= job.minCompleted && job.candidates.some(item => item.status === 'verified');
+  return job.candidates.filter(isCollectable).length >= job.minCompleted && job.candidates.some(item => item.status === 'verified');
 }
 
 function terminalCandidate(status: SwarmCandidateStatus): boolean {
@@ -473,7 +468,7 @@ function toCollectedCandidate(candidate: CandidateRecord & { status: 'verified' 
     ...(candidate.summary ? { summary: candidate.summary } : {}),
     ...(candidate.patchPath ? { patchPath: candidate.patchPath } : {}),
     changedFiles: [...candidate.changedFiles],
-    verification: candidate.verification.map(result => ({ ...result })),
+    verification: candidate.verification.map(({ command, passed, exitCode }) => ({ command, passed, exitCode })),
     ...(candidate.error ? { error: candidate.error } : {}),
   };
 }
