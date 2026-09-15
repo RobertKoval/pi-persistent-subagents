@@ -140,6 +140,11 @@ async function handle(cmd) {
         break;
       }
       response(cmd, true, {});
+      if (cmd.message === '__NEVER_SETTLE__') {
+        isStreaming = true;
+        write({ type: 'agent_start' });
+        break;
+      }
       startTurn(cmd.message, 'ECHO', cmd.message === '__WAIT_UI__' ? 1400 : cmd.message === '__SLOW__' ? 350 : 15);
       break;
     case 'steer':
