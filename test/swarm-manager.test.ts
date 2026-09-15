@@ -10,8 +10,11 @@ class FakePool {
   readonly closed: string[] = [];
   private readonly listeners = new Set<(snapshot: WorkerSnapshot) => void>();
   private serial = 0;
+  private readonly settleDuringSpawn: boolean;
 
-  constructor(private readonly settleDuringSpawn = false) {}
+  constructor(settleDuringSpawn = false) {
+    this.settleDuringSpawn = settleDuringSpawn;
+  }
 
   onSettled(listener: (snapshot: WorkerSnapshot) => void): () => void {
     this.listeners.add(listener);
