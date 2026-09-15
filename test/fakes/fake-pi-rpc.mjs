@@ -87,7 +87,7 @@ function complete(message, prefix = 'ECHO') {
   }
   lastAssistantText = text;
   persistTurn(message, text);
-  write({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text }], usage: { input: 10, output: 3, cacheRead: history.length > 1 ? 7 : 0, cacheWrite: 0, totalTokens: 13, cost: { total: 0 } } });
+  write({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text }], usage: { input: 10, output: 3, cacheRead: history.length > 1 ? 7 : 0, cacheWrite: 0, totalTokens: 13, cost: { total: 0 } } } });
   isStreaming = false;
   write({ type: 'agent_end', messages: [] });
   write({ type: 'agent_settled' });
