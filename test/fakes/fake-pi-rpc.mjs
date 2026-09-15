@@ -145,7 +145,7 @@ async function handle(cmd) {
         write({ type: 'agent_start' });
         break;
       }
-      startTurn(cmd.message, 'ECHO', cmd.message === '__WAIT_UI__' ? 1400 : cmd.message === '__SLOW__' ? 350 : 15);
+      startTurn(cmd.message, 'ECHO', cmd.message === '__WAIT_UI__' ? 1400 : cmd.message === '__SLOW__' ? 1400 : 15);
       break;
     case 'steer':
       response(cmd, true, {});
