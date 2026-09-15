@@ -8,7 +8,8 @@ import { SwarmManager, type SwarmWorkspaceOps } from '../src/swarm-manager.ts';
 class FakePool {
   readonly spawned: Array<{ id: string; input: SpawnAgentInput }> = [];
   readonly closed: string[] = [];
-  private readonly listeners = new Set<(snapshot: WorkerSnapshot) => void>();
+  private readonly settledListeners = new Set<(snapshot: WorkerSnapshot) => void>();
+  private readonly updateListeners = new Set<(snapshot: WorkerSnapshot) => void>();
   private serial = 0;
   private readonly settleDuringSpawn: boolean;
 
@@ -17,8 +18,13 @@ class FakePool {
   }
 
   onSettled(listener: (snapshot: WorkerSnapshot) => void): () => void {
-    this.listeners.add(listener);
-    return () => this.listeners.delete(listener);
+    this.settledListeners.add(listener);
+    return () => this.settledListeners.delete(listener);
+  }
+
+  onUpdate(listener: (snapshot: WorkerSnapshot) => void): () => void {
+    this.updateListeners.add(listener);
+    return () => this.updateListeners.delete(listener);
   }
 
   async spawnAgent(input: SpawnAgentInput): Promise<WorkerSnapshot> {
@@ -30,7 +36,7 @@ class FakePool {
       lastOutput: 'settled before spawn returned',
       completionId: `r-${id}`,
     };
-    for (const listener of this.listeners) listener(settled);
+    for (const listener of this.settledListeners) listener(settled);
     return settled;
   }
 
@@ -43,7 +49,13 @@ class FakePool {
   settle(id: string, output = 'short final candidate summary'): void {
     const cwd = this.spawned.find((entry) => entry.id === id)?.input.cwd ?? '/workspace';
     const settled = { ...snapshot(id, 'idle', cwd), lastOutput: output, completionId: `r-${id}` };
-    for (const listener of this.listeners) listener(settled);
+    for (const listener of this.settledListeners) listener(settled);
+  }
+
+  crash(id: string, error = 'fake worker crashed'): void {
+    const cwd = this.spawned.find((entry) => entry.id === id)?.input.cwd ?? '/workspace';
+    const crashed = { ...snapshot(id, 'crashed', cwd), error };
+    for (const listener of this.updateListeners) listener(crashed);
   }
 }
 
@@ -153,6 +165,48 @@ describe('SwarmManager', () => {
     await eventually(() => manager.status(job.id).state === 'completed', 'fast-settling worker must not leave the job stuck running');
     assert.equal(manager.status(job.id).verified, 1);
     assert.equal(manager.collect(job.id).candidates[0]?.summary, 'settled before spawn returned');
+  });
+
+  it('recovers a crashed worker and backfills the freed active slot', async () => {
+    const pool = new FakePool();
+    const manager = new SwarmManager({ pool, storageRoot: '/storage', workspace: workspaceOps() });
+    managers.push(manager);
+    const job = manager.start({
+      task: 'fix it',
+      cwd: '/repo',
+      maxCandidates: 2,
+      maxActive: 1,
+      minCompleted: 2,
+      acceptanceCommands: ['npm test -- target'],
+    });
+    await eventually(() => pool.spawned.length === 1, 'first worker should start');
+    pool.crash('w1');
+    await eventually(() => pool.spawned.length === 2, 'crashed worker should free the slot for the next candidate');
+    pool.settle('w2');
+    await eventually(() => manager.status(job.id).state === 'completed', 'job should finish after replacement candidate settles');
+    const candidates = manager.collect(job.id, 2).candidates;
+    assert.equal(candidates[0]?.status, 'verified');
+    assert.equal(candidates[1]?.status, 'rejected');
+    assert.match(candidates[1]?.error ?? '', /crash/i);
+  });
+
+  it('times out a stuck candidate at the task level instead of occupying a slot forever', async () => {
+    const pool = new FakePool();
+    const manager = new SwarmManager({ pool, storageRoot: '/storage', workspace: workspaceOps() });
+    managers.push(manager);
+    const job = manager.start({
+      task: 'might loop forever',
+      cwd: '/repo',
+      maxCandidates: 1,
+      maxActive: 1,
+      candidateTimeoutMs: 30,
+    });
+    await eventually(() => pool.spawned.length === 1, 'worker should start');
+    await eventually(() => manager.status(job.id).state === 'completed', 'candidate timeout should terminate the job');
+    const result = manager.collect(job.id).candidates[0]!;
+    assert.equal(result.status, 'rejected');
+    assert.match(result.error ?? '', /timed out/i);
+    assert.deepEqual(pool.closed, ['w1']);
   });
 
   it('separates logical width from active concurrency and early-stops after enough verified candidates', async () => {
