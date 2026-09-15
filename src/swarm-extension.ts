@@ -6,6 +6,7 @@ import { encode } from '@toon-format/toon';
 import { Type } from 'typebox';
 import { seedAccountSelection } from './account-selection.ts';
 import { loadConfig, type PersistentSubagentConfig } from './config.ts';
+import { MetricsAdapter, inheritedMetricsIdentity } from './metrics-adapter.ts';
 import { buildPiRpcArgs, resolvePiInvocation } from './pi-invocation.ts';
 import { WorkerPool, type PiInvocationFactory } from './pool.ts';
 import { SwarmManager } from './swarm-manager.ts';
@@ -32,6 +33,7 @@ interface SwarmBundle {
   sessionId: string;
   pool: WorkerPool;
   manager: SwarmManager;
+  metrics: MetricsAdapter;
   config: PersistentSubagentConfig;
 }
 
@@ -61,7 +63,24 @@ export default function swarmExtension(pi: ExtensionAPI) {
       return { ...resolved, cwd: spec.cwd, env: spec.env };
     };
 
+    const metrics = new MetricsAdapter(
+      metricsPath(agentDir),
+      ctx.cwd,
+      sessionId,
+      loaded.config,
+      0,
+      () => ctx.ui.notify(
+        'persistent-subagents swarm: metrics recording failed; this session has a telemetry gap. Check database permissions and disk space.',
+        'warning',
+      ),
+      inheritedMetricsIdentity(process.env.PI_PERSISTENT_METRICS_IDENTITY),
+    );
+
     const pool = new WorkerPool({
+      workerEnv: record => ({
+        PI_PERSISTENT_METRICS_IDENTITY: JSON.stringify(metrics.childIdentity(record)),
+      }),
+      observeWorker: (record, workerSession, api) => metrics.worker(record, workerSession, api),
       config: loaded.config,
       storageRoot: join(agentDir, 'persistent-subagents', 'swarm-workers'),
       parentSessionId: `${sessionId}:local-swarm`,
@@ -77,7 +96,7 @@ export default function swarmExtension(pi: ExtensionAPI) {
       pool,
       storageRoot: join(agentDir, 'persistent-subagents', 'swarms', `parent-${sessionScope}`),
     });
-    return { sessionId, pool, manager, config: loaded.config };
+    return { sessionId, pool, manager, metrics, config: loaded.config };
   };
 
   const ensureBundle = async (ctx: ExtensionContext): Promise<SwarmBundle> => {
@@ -87,6 +106,7 @@ export default function swarmExtension(pi: ExtensionAPI) {
         const old = await bundlePromise.catch(() => null);
         await old?.manager.cleanup().catch(() => undefined);
         await old?.pool.cleanup().catch(() => undefined);
+        old?.metrics.close();
       }
       bundleSessionId = sessionId;
       bundlePromise = createBundle(ctx);
@@ -104,6 +124,7 @@ export default function swarmExtension(pi: ExtensionAPI) {
     const bundle = await current.catch(() => null);
     await bundle?.manager.cleanup().catch(() => undefined);
     await bundle?.pool.cleanup().catch(() => undefined);
+    bundle?.metrics.close();
   };
 
   pi.registerTool({
@@ -204,6 +225,11 @@ function toolResult(text: string, details: unknown) {
 
 function getAgentDir(): string {
   return process.env.PI_CODING_AGENT_DIR?.trim() || join(homedir(), '.pi', 'agent');
+}
+
+function metricsPath(agentDir: string): string {
+  return process.env.PI_PERSISTENT_SUBAGENTS_METRICS_DB?.trim()
+    || join(agentDir, 'persistent-subagents', 'metrics.sqlite');
 }
 
 function parseDepth(value: string | undefined): number {
