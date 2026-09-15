@@ -65,7 +65,7 @@ function fakeSnapshot(root = '/repo'): WorkspaceSnapshot {
   };
 }
 
-function workspaceOps(options: { snapshotGate?: Promise<void>; verify?: boolean } = {}): SwarmWorkspaceOps {
+function workspaceOps(options: { snapshotGate?: Promise<void>; verify?: boolean; emptyPatch?: boolean } = {}): SwarmWorkspaceOps {
   return {
     async createSnapshot(cwd) {
       await options.snapshotGate;
@@ -79,14 +79,20 @@ function workspaceOps(options: { snapshotGate?: Promise<void>; verify?: boolean 
         candidateId: worktree.id,
         commit: `commit-${worktree.id}`,
         patchPath: `/artifacts/${worktree.id}.diff`,
-        changedFiles: [`src/${worktree.id}.ts`],
+        changedFiles: options.emptyPatch ? [] : [`src/${worktree.id}.ts`],
       };
     },
     async removeWorktree(_snapshot: WorkspaceSnapshot, _worktree: CandidateWorktree) {},
     async removeSnapshot(_snapshot: WorkspaceSnapshot) {},
     async applyPatch(_cwd: string, _patch: string) { return { applied: true }; },
     async verify(_cwd: string, commands: string[]) {
-      return commands.map(command => ({ command, passed: options.verify !== false, exitCode: options.verify === false ? 1 : 0, stdout: '', stderr: '' }));
+      return commands.map(command => ({
+        command,
+        passed: options.verify !== false,
+        exitCode: options.verify === false ? 1 : 0,
+        stdout: 'large verifier stdout must stay internal',
+        stderr: 'large verifier stderr must stay internal',
+      }));
     },
   };
 }
@@ -153,7 +159,10 @@ describe('SwarmManager', () => {
     assert.equal(collected.candidates.length, 1);
     assert.equal(collected.candidates[0]?.status, 'verified');
     assert.match(collected.candidates[0]?.patchPath ?? '', /\.diff$/);
-    assert.deepEqual(collected.candidates[0]?.changedFiles.length, 1);
+    assert.equal(collected.candidates[0]?.changedFiles.length, 1);
+    assert.deepEqual(collected.candidates[0]?.verification, [
+      { command: 'npm test -- target', passed: true, exitCode: 0 },
+    ], 'collect must not inject verifier stdout/stderr into frontier context');
   });
 
   it('marks candidates partial when no acceptance evidence exists instead of claiming verification', async () => {
@@ -166,6 +175,27 @@ describe('SwarmManager', () => {
     await eventually(() => manager.status(job.id).completed === 1, 'candidate should finish');
     const result = manager.collect(job.id, 1).candidates[0]!;
     assert.equal(result.status, 'partial');
+  });
+
+  it('refuses to apply a rejected candidate', async () => {
+    const pool = new FakePool();
+    const manager = new SwarmManager({ pool, storageRoot: '/storage', workspace: workspaceOps({ emptyPatch: true }) });
+    managers.push(manager);
+    const job = manager.start({
+      task: 'fix',
+      cwd: '/repo',
+      maxCandidates: 1,
+      maxActive: 1,
+      acceptanceCommands: ['npm test'],
+    });
+    await eventually(() => pool.spawned.length === 1, 'worker should start');
+    pool.settle('w1');
+    await eventually(() => manager.status(job.id).completed === 1, 'candidate should finish');
+    const result = manager.collect(job.id, 1).candidates[0]!;
+    assert.equal(result.status, 'rejected');
+    const applied = await manager.apply(job.id, result.id);
+    assert.equal(applied.applied, false);
+    assert.match(applied.reason ?? '', /rejected|not eligible/i);
   });
 
   it('cancels active and queued candidates without waiting for them to settle', async () => {
