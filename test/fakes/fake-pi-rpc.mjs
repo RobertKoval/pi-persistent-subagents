@@ -57,6 +57,18 @@ function persistTurn(message, text) {
   if (sessionFile) fs.appendFileSync(sessionFile, JSON.stringify(item) + '\n');
 }
 
+function performTestFilesystemDirective(message) {
+  const match = /__WRITE_FILE__\(([^,()\n]+),([^()\n]*)\)/.exec(message);
+  if (!match) return;
+  const relative = match[1].trim();
+  const content = match[2];
+  const root = path.resolve(process.cwd());
+  const target = path.resolve(root, relative);
+  if (target !== root && !target.startsWith(`${root}${path.sep}`)) throw new Error('fake write target escapes cwd');
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, content);
+}
+
 function complete(message, prefix = 'ECHO') {
   if (message === '__CRASH__') {
     setTimeout(() => process.exit(9), 10);
@@ -66,6 +78,7 @@ function complete(message, prefix = 'ECHO') {
     write({type:'message_end',message:{role:'assistant',content:[],stopReason:'error',errorMessage:'The usage limit has been reached',usage:{input:0,output:0,cacheRead:0,cacheWrite:0}}});
     isStreaming=false; write({type:'agent_settled'}); return;
   }
+  performTestFilesystemDirective(message);
   let text;
   if (message === '__REMEMBER__') {
     text = history.at(-1)?.response ?? 'NOTHING';
@@ -74,7 +87,7 @@ function complete(message, prefix = 'ECHO') {
   }
   lastAssistantText = text;
   persistTurn(message, text);
-  write({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text }], usage: { input: 10, output: 3, cacheRead: history.length > 1 ? 7 : 0, cacheWrite: 0, totalTokens: 13, cost: { total: 0 } } } });
+  write({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text }], usage: { input: 10, output: 3, cacheRead: history.length > 1 ? 7 : 0, cacheWrite: 0, totalTokens: 13, cost: { total: 0 } } });
   isStreaming = false;
   write({ type: 'agent_end', messages: [] });
   write({ type: 'agent_settled' });
