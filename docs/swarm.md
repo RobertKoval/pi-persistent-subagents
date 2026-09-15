@@ -61,6 +61,7 @@ Important fields:
 - `max_candidates`: logical search width. Default 6, maximum 32.
 - `max_active`: maximum simultaneously active candidates. Default `min(3, max_candidates)` and additionally clamped to `maxAgents`.
 - `min_completed`: minimum completed candidates before a verified result may trigger early stopping. Default 2 when possible.
+- `candidate_timeout_ms`: wall-clock limit for one local candidate. Default 300000 ms, maximum 3600000 ms. A timed-out candidate is rejected and its slot is backfilled.
 - `acceptance_commands`: shell commands the runtime executes independently after a candidate settles.
 - `role`, `provider`, `model`, `thinking`: worker selection overrides.
 
@@ -71,6 +72,7 @@ swarm start
   task: "Find and fix the cache invalidation bug after module rename"
   max_candidates: 8
   max_active: 3
+  candidate_timeout_ms: 180000
   acceptance_commands:
     - "npm test -- cache"
 ```
@@ -97,7 +99,7 @@ Candidate states have evidence semantics:
 
 - `verified`: repository changed and every configured acceptance command exited zero;
 - `partial`: repository changed, but no acceptance commands were supplied or not all verification evidence is sufficient;
-- `rejected`: no useful repository change or candidate capture/verification failed.
+- `rejected`: no useful repository change, candidate capture/verification failed, the worker crashed, or its wall-clock budget expired.
 
 `verified` means the configured executable checks passed. It is evidence for the frontier agent, not a claim that a patch is universally correct.
 
@@ -127,9 +129,16 @@ Each candidate receives a detached Git worktree from that synthetic commit. Cand
 
 Git must be available on `PATH`, and the working directory must be inside a Git repository.
 
-## Scheduling and early stopping
+## Scheduling, failures, and early stopping
 
-The scheduler fills at most `max_active` candidate slots. When one settles, a queued strategy backfills the slot. After at least `min_completed` candidates have completed, the first verified pool result can stop remaining queued work and cancel running stragglers.
+The scheduler fills at most `max_active` candidate slots. When one settles, crashes, or times out, a queued strategy backfills the slot. A task-level candidate timeout prevents a looping weak model from occupying local capacity indefinitely.
+
+After at least `min_completed` candidates have completed, the first verified pool result can stop remaining queued work and cancel running stragglers.
+
+The manager also handles two races common with fast local workers:
+
+- a worker may settle before `spawnAgent()` returns; the returned terminal snapshot is recovered instead of losing the completion;
+- a live child may crash without `agent_settled`; `WorkerPool` crash updates reject the candidate and free its slot.
 
 The initial strategy pool intentionally varies search priors: execution-first, static flow, test-first, minimal patch, boundary analysis, alternative root cause, regression focus and dependency-boundary analysis. This aims to reduce correlated failures compared with identical sampling prompts.
 
@@ -152,6 +161,12 @@ The frontier normally sees only:
 3. one compact `collect` result at the natural dependency point.
 
 This keeps failed local reasoning, terminal output and redundant candidate text out of the frontier context.
+
+## Metrics
+
+Local swarm worker calls use the existing `persistent-subagents/metrics.sqlite` recorder when `metricsWorkers` is enabled. Provider/model attribution, input/output/cache usage, timings, concurrency and the other existing worker metrics therefore remain available through `/pmetrics`.
+
+The current vertical slice does **not** yet add first-class historical `swarm_job_id`, candidate strategy, early-stop reason, or accepted/rejected/apply outcome dimensions to the metrics schema. Those are follow-up instrumentation rather than inferred from prompts or tool arguments.
 
 ## Storage
 
@@ -177,7 +192,7 @@ The first vertical slice intentionally does not yet implement:
 - container/namespace sandboxing;
 - automatic full-suite discovery;
 - three-way merge/conflict resolution when applying a patch;
-- swarm-specific historical metrics/dashboard fields;
+- swarm-specific historical job/candidate dimensions in the metrics dashboard;
 - a single aggregate process budget shared between persistent workers and swarm workers.
 
 The existing `maxAgents` limit is enforced inside the swarm worker pool, but the persistent-worker pool is separate, so the current process-wide total can exceed `maxAgents` when both systems are active. Size the setting conservatively until a shared capacity broker is added.
@@ -191,6 +206,7 @@ The useful production metrics are not only local pass rate. Measure:
 - frontier input/output tokens and turns with and without swarm delegation;
 - wall-clock time to a useful/verified result;
 - local candidate count actually started versus cancelled before start;
+- crash/timeout rate by local model and strategy;
 - local aggregate throughput at different `max_active` values;
 - percentage of candidates applied unchanged, rewritten by frontier, or used only as evidence;
 - frontier quota lifetime on the real work distribution.
