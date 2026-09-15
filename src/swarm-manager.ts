@@ -280,6 +280,14 @@ export class SwarmManager {
         candidate.workerId = worker.id;
         candidate.status = 'running';
         this.workerToCandidate.set(worker.id, { jobId: job.id, candidateId: candidate.id });
+
+        // A very fast local worker can settle between prompt acceptance and spawnAgent()
+        // returning. Its onSettled event then arrives before the mapping above exists. The
+        // returned pool snapshot is authoritative, so recover that completion here.
+        if (workerTurnTerminal(worker.status)) {
+          await this.handleSettled(job.id, candidate.id, worker);
+          if (job.state !== 'running') return;
+        }
       } catch (error) {
         candidate.status = 'rejected';
         candidate.error = `Candidate startup failed: ${message(error)}`;
@@ -444,6 +452,10 @@ function shouldEarlyStop(job: JobRecord): boolean {
 
 function terminalCandidate(status: SwarmCandidateStatus): boolean {
   return ['verified', 'partial', 'rejected', 'cancelled'].includes(status);
+}
+
+function workerTurnTerminal(status: WorkerSnapshot['status']): boolean {
+  return status === 'idle' || status === 'closed' || status === 'crashed';
 }
 
 function isCollectable(candidate: CandidateRecord): candidate is CandidateRecord & { status: 'verified' | 'partial' | 'rejected' } {
