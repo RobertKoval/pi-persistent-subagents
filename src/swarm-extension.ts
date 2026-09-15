@@ -152,6 +152,7 @@ export default function swarmExtension(pi: ExtensionAPI) {
       max_candidates: Type.Optional(Type.Integer({ minimum: 1, maximum: 32 })),
       max_active: Type.Optional(Type.Integer({ minimum: 1, maximum: 32 })),
       min_completed: Type.Optional(Type.Integer({ minimum: 1, maximum: 32 })),
+      candidate_timeout_ms: Type.Optional(Type.Integer({ minimum: 1_000, maximum: 3_600_000, description: 'Wall-clock limit for one local candidate. Default 300000ms.' })),
       acceptance_commands: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { maxItems: 32 })),
       top_k: Type.Optional(Type.Integer({ minimum: 1, maximum: 8 })),
     }),
@@ -168,6 +169,7 @@ export default function swarmExtension(pi: ExtensionAPI) {
         const maxCandidates = params.max_candidates ?? 6;
         const requestedActive = params.max_active ?? Math.min(3, maxCandidates);
         const maxActive = Math.min(requestedActive, maxCandidates, bundle.config.maxAgents);
+        const candidateTimeoutMs = params.candidate_timeout_ms ?? 300_000;
         const status = bundle.manager.start({
           task: params.task,
           cwd: ctx.cwd,
@@ -178,9 +180,10 @@ export default function swarmExtension(pi: ExtensionAPI) {
           maxCandidates,
           maxActive,
           minCompleted: Math.min(params.min_completed ?? Math.min(2, maxCandidates), maxCandidates),
+          candidateTimeoutMs,
           acceptanceCommands: params.acceptance_commands ?? [],
         });
-        return toolResult(encode({ ...status, max_candidates: maxCandidates, max_active: maxActive }), status);
+        return toolResult(encode({ ...status, max_candidates: maxCandidates, max_active: maxActive, candidate_timeout_ms: candidateTimeoutMs }), status);
       }
 
       const jobId = params.job_id?.trim();
