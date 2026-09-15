@@ -1,3 +1,4 @@
+import { attribution, applyAttribution, ATTRIBUTION_ENV } from './openrouter-attribution.ts';
 import { startMetricsPanel, type MetricsPanel } from './metrics-web.ts';
 import { saveMetricsSetting } from './metrics-settings.ts';
 import { MetricsAdapter, inheritedMetricsIdentity } from './metrics-adapter.ts';
@@ -48,6 +49,19 @@ interface PoolBundle {
 export default function persistentSubagentsExtension(pi: ExtensionAPI) {
   let bundlePromise: Promise<PoolBundle> | null = null;
   let bundleSessionId: string | null = null;
+  const inheritedAttribution = attribution(process.env[ATTRIBUTION_ENV] ? JSON.parse(process.env[ATTRIBUTION_ENV]!) : {});
+  let observedAttribution: Record<string,string> = {};
+  let pendingHeaders: Record<string,string|null> | undefined;
+  pi.on('before_provider_headers', (event, ctx) => {
+    if (ctx.model?.provider !== 'openrouter') return;
+    applyAttribution(event.headers, inheritedAttribution);
+    // Keep the shared header object only until response so later hooks are observed too.
+    pendingHeaders = event.headers;
+  });
+  pi.on('after_provider_response', () => {
+    if (pendingHeaders) observedAttribution = attribution(pendingHeaders);
+    pendingHeaders = undefined;
+  });
 
   const currentParent = (ctx: ExtensionContext) => ({
     models: ctx.modelRegistry?.getAll().map(({provider, id}) => ({provider, id})),
@@ -72,7 +86,14 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
 
     const metrics = new MetricsAdapter(metricsPath(agentDir),ctx.cwd,sessionId,loaded.config,depth,()=>ctx.ui.notify('persistent-subagents: metrics recording failed; this session has a telemetry gap. Check database permissions and disk space.', 'warning'),inheritedMetricsIdentity(process.env.PI_PERSISTENT_METRICS_IDENTITY));
     const pool = new WorkerPool({
-      workerEnv: record => ({PI_PERSISTENT_METRICS_IDENTITY:JSON.stringify(metrics.childIdentity(record))}),
+      workerEnv: record => ({
+        PI_PERSISTENT_METRICS_IDENTITY:JSON.stringify(metrics.childIdentity(record)),
+        [ATTRIBUTION_ENV]:JSON.stringify(record.provider === 'openrouter' ? {
+          ...inheritedAttribution,
+          ...attribution(ctx.model?.provider === 'openrouter' ? ctx.model.headers : undefined),
+          ...observedAttribution,
+        } : {}),
+      }),
       observeWorker: (record, workerSession, api) => metrics.worker(record,workerSession,api),
       config: loaded.config,
       storageRoot: join(agentDir, 'persistent-subagents'),

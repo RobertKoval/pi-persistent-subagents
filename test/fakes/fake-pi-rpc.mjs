@@ -67,7 +67,9 @@ function complete(message, prefix = 'ECHO') {
     isStreaming=false; write({type:'agent_settled'}); return;
   }
   let text;
-  if (message === '__REMEMBER__') {
+  if (message === '__APP_ATTRIBUTION__') {
+    text = process.env.PI_PERSISTENT_OPENROUTER_ATTRIBUTION ?? '{}';
+  } else if (message === '__REMEMBER__') {
     text = history.at(-1)?.response ?? 'NOTHING';
   } else {
     text = `${prefix}:${message}`;

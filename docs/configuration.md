@@ -49,3 +49,13 @@ Completion messages contain worker IDs, result IDs and status, without output, t
 ## Metrics
 
 Use `/pmetrics` for the local dashboard and independent tracking switches. See [usage, capacity methods, privacy and coverage](metrics.md).
+
+### OpenRouter app attribution
+
+New OpenRouter workers inherit the parent's `HTTP-Referer` and app title
+(`X-OpenRouter-Title`, or legacy `X-Title`). Existing worker headers take precedence.
+Only these app fields are copied; authentication and other request headers are not.
+The parent model's configured headers are available immediately. Attribution added
+by request hooks becomes available after the parent's OpenRouter response headers
+arrive. If the parent has no attribution, none is invented. Already-running worker
+processes retain their startup values. This does not change account selection.
