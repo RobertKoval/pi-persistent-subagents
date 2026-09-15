@@ -400,7 +400,7 @@ function humanAgentList(agents: WorkerSnapshot[]): string {
     const identity = [a.id, a.name, a.role].filter(Boolean).join(' · ');
     const process = a.pid ? `pid=${a.pid}` : 'no-process';
     const model = [a.provider, a.model].filter(Boolean).join('/');
-    return `${identity} — ${a.status} — ${process}${model ? ` — ${model}` : ''} — ${a.cacheContinuity}`;
+    return `${identity} — ${a.status} — ${process}${model ? ` — ${model}` : ''}${a.thinking ? ` — thinking=${a.thinking}` : ''} — ${a.cacheContinuity}`;
   }).join('\n');
 }
 

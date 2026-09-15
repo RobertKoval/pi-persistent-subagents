@@ -26,11 +26,12 @@ async function harness(depth = 0, settings: Record<string, unknown> = {}) {
   const commands = new Map<string, any>();
   const events = new Map<string, any>();
   const notifications: any[] = [];
+  const uiMessages: string[] = [];
   let entries: any[] = [];
   let active: string[] | undefined;
   let idle = true;
   const ctx: any = { isIdle: () => idle, hasPendingMessages: () => false, cwd: root, model: { provider: 'openai-codex', id: 'fake' }, thinkingLevel: 'low',
-    sessionManager: { getSessionId: () => 'parent', getEntries: () => entries }, ui: { notify() {} } };
+    sessionManager: { getSessionId: () => 'parent', getEntries: () => entries }, ui: { notify(message: string) { uiMessages.push(message); } } };
   extension({ registerTool: (t: any) => tools.set(t.name, t), registerCommand(name:string, command:any) { commands.set(name,command); },
     on: (name: string, fn: any) => events.set(name, fn), sendMessage(message: any, options: any) { notifications.push({message,options}); },
     getActiveTools: () => active ?? [...tools.keys()], setActiveTools(names: string[]) { active = names; } } as any);
@@ -42,7 +43,7 @@ async function harness(depth = 0, settings: Record<string, unknown> = {}) {
     await rm(root, { recursive: true, force: true });
   });
   const call = (name: string, params: any, onUpdate?: (value: any) => void) => tools.get(name).execute('test', params, undefined, onUpdate, ctx);
-  return { root, command:(args:string)=>commands.get('pmetrics').handler(args,ctx), event: (event:any) => events.get(event.type)?.(event,ctx), setIdle(value: boolean) { idle=value; }, notifications, call, start: () => events.get('session_start')({},ctx), active: () => active ?? [...tools.keys()], shutdown: () => events.get('session_shutdown')({},ctx), select(account: string) { entries = [{ type: 'custom', customType: 'pi-accounts-selection', data: { version: 1, sessionId: 'parent', providers: { 'openai-codex': account } } }]; } };
+  return { root, uiMessages, workers:()=>commands.get('pworkers').handler('',ctx), command:(args:string)=>commands.get('pmetrics').handler(args,ctx), event: (event:any) => events.get(event.type)?.(event,ctx), setIdle(value: boolean) { idle=value; }, notifications, call, start: () => events.get('session_start')({},ctx), active: () => active ?? [...tools.keys()], shutdown: () => events.get('session_shutdown')({},ctx), select(account: string) { entries = [{ type: 'custom', customType: 'pi-accounts-selection', data: { version: 1, sessionId: 'parent', providers: { 'openai-codex': account } } }]; } };
 }
 
 it('lists the same session path exposed by spawn after settling', async () => {
@@ -275,3 +276,13 @@ it('refreshes elapsed wait time and releases the timer when a worker settles', a
   await new Promise(resolve => setTimeout(resolve, 1100));
   assert.equal(updates.length, count);
 });
+
+
+for (const thinking of ['low', 'high', 'off']) {
+  it(`shows worker thinking=${thinking} in pworkers`, async () => {
+    const h = await harness();
+    const worker = (await h.call('spawn_agent', {task:'hello', thinking})).details;
+    await h.workers();
+    assert.match(h.uiMessages.at(-1)!, new RegExp(`${worker.id}.*thinking=${thinking}`));
+  });
+}
