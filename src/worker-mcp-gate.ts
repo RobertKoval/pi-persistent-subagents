@@ -30,6 +30,11 @@ export type WorkerGatePolicy =
   | { readonly kind: 'invalid'; readonly error: string };
 
 const SERVER_NAME = /^[A-Za-z0-9_-]+$/;
+/**
+ * Pi's resource tools reach every MCP server. MCP resources are read-only, so a valid allowlist,
+ * which exists to stop writes, leaves them alone; an unreadable one blocks them with every MCP tool.
+ */
+const MCP_RESOURCE_TOOLS: ReadonlySet<string> = new Set(['list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource']);
 const ALLOWED: ToolVerdict = { allowed: true };
 
 /** Validates a configured allowlist; throws with the offending field on invalid input. */
@@ -51,10 +56,34 @@ export function validateWorkerMcpAllowlist(raw: unknown, name = 'workerMcpAllowl
   return result;
 }
 
-/** A patch entry replaces the base entry for the same Pi server, however its name is spelled. */
-export function mergeWorkerMcpAllowlists(base: WorkerMcpAllowlist, patch: WorkerMcpAllowlist): WorkerMcpAllowlist {
-  const patched = new Set(Object.keys(patch).map(piName));
-  return { ...Object.fromEntries(Object.entries(base).filter(([server]) => !patched.has(piName(server)))), ...patch };
+/**
+ * A later layer (the project file) may only tighten an earlier one (the global file): it can add
+ * servers, or close a listed server with an empty list. A non-empty entry for a server the base
+ * already lists, however its name is spelled, would replace that decision, so it is ignored and
+ * reported in `ignored`.
+ */
+export function mergeWorkerMcpAllowlists(
+  base: WorkerMcpAllowlist,
+  patch: WorkerMcpAllowlist,
+): { allowlist: WorkerMcpAllowlist; ignored: string[] } {
+  const merged: Record<string, readonly string[]> = { ...base };
+  const ignored: string[] = [];
+  for (const [server, allowed] of Object.entries(patch)) {
+    const listed = Object.keys(merged).find((name) => piName(name) === piName(server));
+    if (listed === undefined) {
+      merged[server] = allowed;
+    } else if (allowed.length === 0) {
+      delete merged[listed];
+      merged[server] = allowed;
+    } else if (!sameList(allowed, merged[listed]!)) {
+      ignored.push(server);
+    }
+  }
+  return { allowlist: merged, ignored };
+}
+
+function sameList(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((item, index) => item === b[index]);
 }
 
 export function compileWorkerMcpAllowlist(allowlist: WorkerMcpAllowlist): WorkerGatePolicy {
@@ -96,7 +125,7 @@ export function decideWorkerToolCall(policy: WorkerGatePolicy, toolName: string)
     case 'none':
       return ALLOWED;
     case 'invalid':
-      return toolName.startsWith('mcp__')
+      return toolName.startsWith('mcp__') || MCP_RESOURCE_TOOLS.has(toolName)
         ? { allowed: false, reason: `persistent-subagents: ${toolName} is blocked because the worker MCP allowlist is invalid (${policy.error}).` }
         : ALLOWED;
     case 'allowlist':

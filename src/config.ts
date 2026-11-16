@@ -71,7 +71,11 @@ export async function loadConfig(cwd: string, agentDir: string): Promise<LoadedC
   const global = await readConfigFile(globalPath, 'global', warnings);
   if (global) config = mergeConfig(config, global);
   const project = await readConfigFile(projectPath, 'project', warnings);
-  if (project) config = mergeConfig(config, project);
+  if (project) {
+    config = mergeConfig(config, project, (server) => warnings.push(
+      `project config ${projectPath}: workerMcpAllowlist.${server} was ignored; a project can add servers or close a listed one with [], but cannot replace the global allowlist`,
+    ));
+  }
 
   return { config, warnings };
 }
@@ -147,12 +151,13 @@ function validatePartialConfig(raw: unknown): PartialConfig {
   return result;
 }
 
-function mergeConfig(base: PersistentSubagentConfig, patch: PartialConfig): PersistentSubagentConfig {
+function mergeConfig(base: PersistentSubagentConfig, patch: PartialConfig, onIgnoredAllowlist: (server: string) => void = () => {}): PersistentSubagentConfig {
   const mergedRoles: Record<string, RoleConfig> = { ...base.roles };
   if (patch.roles) {
     for (const [name, role] of Object.entries(patch.roles)) mergedRoles[name] = { ...(base.roles[name] ?? {}), ...role };
   }
-  const workerMcpAllowlist = mergeWorkerMcpAllowlists(base.workerMcpAllowlist, patch.workerMcpAllowlist ?? {});
+  const { allowlist: workerMcpAllowlist, ignored } = mergeWorkerMcpAllowlists(base.workerMcpAllowlist, patch.workerMcpAllowlist ?? {});
+  ignored.forEach(onIgnoredAllowlist);
   return { ...base, ...patch, roles: mergedRoles, workerMcpAllowlist } as PersistentSubagentConfig;
 }
 

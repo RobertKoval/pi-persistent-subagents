@@ -42,6 +42,11 @@ describe('worker MCP allowlist decisions', () => {
     assert.equal(allowed(HINDSIGHT, 'mcp__hindsight__get_'), true);
   });
 
+  it('leaves read-only MCP resource tools to a valid allowlist', () => {
+    assert.equal(allowed(HINDSIGHT, 'read_mcp_resource'), true);
+    assert.equal(allowed(HINDSIGHT, 'list_mcp_resources'), true);
+  });
+
   it('leaves non-MCP tools, other servers and look-alike server names untouched', () => {
     assert.equal(allowed(HINDSIGHT, 'bash'), true);
     assert.equal(allowed(HINDSIGHT, 'mcp__other__retain'), true);
@@ -93,6 +98,9 @@ describe('inherited worker policy', () => {
       const policy = policyFromEnv(raw);
       assert.equal(decideWorkerToolCall(policy, 'mcp__hindsight__recall').allowed, false, raw);
       assert.equal(decideWorkerToolCall(policy, 'mcp__other__anything').allowed, false, raw);
+      for (const resourceTool of ['list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource']) {
+        assert.equal(decideWorkerToolCall(policy, resourceTool).allowed, false, `${raw} ${resourceTool}`);
+      }
       assert.equal(decideWorkerToolCall(policy, 'bash').allowed, true, raw);
     }
   });
@@ -138,7 +146,7 @@ describe('worker launch', () => {
     assert.match(WORKER_MCP_GATE_PATH, /worker-mcp-gate\.ts$/);
   });
 
-  it('reads the allowlist from config, with project entries replacing global ones per server', async () => {
+  it('lets a project add servers or close one, but not widen the global allowlist', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pi-persistent-gate-'));
     const cwd = join(root, 'project');
     const agentDir = join(root, 'agent');
@@ -148,11 +156,25 @@ describe('worker launch', () => {
       workerMcpAllowlist: { hindsight: ['recall'], 'dev-radius': ['read'] },
     }));
     await writeFile(join(cwd, '.pi', 'persistent-subagents.json'), JSON.stringify({
-      workerMcpAllowlist: { dev_radius: [] },
+      workerMcpAllowlist: { hindsight: ['*'], dev_radius: [], docs: ['get_*'] },
     }));
     const { config, warnings } = await loadConfig(cwd, agentDir);
+    assert.deepEqual(config.workerMcpAllowlist, { hindsight: ['recall'], dev_radius: [], docs: ['get_*'] });
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /workerMcpAllowlist\.hindsight was ignored/);
+  });
+
+  it('accepts a project that repeats the global allowlist without a warning', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pi-persistent-gate-'));
+    const cwd = join(root, 'project');
+    const agentDir = join(root, 'agent');
+    await mkdir(join(cwd, '.pi'), { recursive: true });
+    await mkdir(join(agentDir, 'persistent-subagents'), { recursive: true });
+    await writeFile(join(agentDir, 'persistent-subagents', 'config.json'), JSON.stringify({ workerMcpAllowlist: HINDSIGHT }));
+    await writeFile(join(cwd, '.pi', 'persistent-subagents.json'), JSON.stringify({ workerMcpAllowlist: HINDSIGHT }));
+    const { config, warnings } = await loadConfig(cwd, agentDir);
     assert.deepEqual(warnings, []);
-    assert.deepEqual(config.workerMcpAllowlist, { hindsight: ['recall'], dev_radius: [] });
+    assert.deepEqual(config.workerMcpAllowlist, HINDSIGHT);
   });
 
   it('rejects a config file whose allowlist is malformed', async () => {
