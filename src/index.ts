@@ -11,6 +11,7 @@ import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-a
 import { Type } from 'typebox';
 import { loadConfig, type PersistentSubagentConfig } from './config.ts';
 import { buildPiRpcArgs, resolvePiInvocation } from './pi-invocation.ts';
+import { WORKER_MCP_ALLOWLIST_ENV, WORKER_MCP_GATE_PATH, workerAllowlistForChildren } from './worker-mcp-gate.ts';
 import {
   WorkerPool,
   type PiInvocationFactory,
@@ -78,15 +79,18 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
     for (const warning of loaded.warnings) ctx.ui.notify(`persistent-subagents: ${warning}`, 'warning');
 
     const depth = parseDepth(process.env.PI_PERSISTENT_SUBAGENT_DEPTH);
+    const workerMcpAllowlist = workerAllowlistForChildren(process.env[WORKER_MCP_ALLOWLIST_ENV], loaded.config.workerMcpAllowlist);
     const invocationFactory: PiInvocationFactory = (spec) => {
       seedAccountSelection(spec.sessionFile, spec.cwd, ctx.sessionManager);
-      const resolved = resolvePiInvocation(buildPiRpcArgs(spec));
+      const extensions = workerMcpAllowlist === undefined ? [] : [WORKER_MCP_GATE_PATH];
+      const resolved = resolvePiInvocation(buildPiRpcArgs({ ...spec, extensions }));
       return { ...resolved, cwd: spec.cwd, env: spec.env };
     };
 
     const metrics = new MetricsAdapter(metricsPath(agentDir),ctx.cwd,sessionId,loaded.config,depth,()=>ctx.ui.notify('persistent-subagents: metrics recording failed; this session has a telemetry gap. Check database permissions and disk space.', 'warning'),inheritedMetricsIdentity(process.env.PI_PERSISTENT_METRICS_IDENTITY));
     const pool = new WorkerPool({
       workerEnv: record => ({
+        ...(workerMcpAllowlist === undefined ? {} : { [WORKER_MCP_ALLOWLIST_ENV]: workerMcpAllowlist }),
         PI_PERSISTENT_METRICS_IDENTITY:JSON.stringify(metrics.childIdentity(record)),
         [ATTRIBUTION_ENV]:JSON.stringify(record.provider === 'openrouter' ? {
           ...inheritedAttribution,

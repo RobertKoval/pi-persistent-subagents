@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { mergeWorkerMcpAllowlists, validateWorkerMcpAllowlist, type WorkerMcpAllowlist } from './worker-mcp-gate.ts';
 
 export const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 export type ThinkingLevelName = (typeof THINKING_LEVELS)[number];
@@ -25,6 +26,8 @@ export interface PersistentSubagentConfig {
   inheritParentModel: boolean;
   inheritParentThinking: boolean;
   roles: Record<string, RoleConfig>;
+  /** Per MCP server, the tools workers may call; other tools of a listed server are blocked in workers. */
+  workerMcpAllowlist: WorkerMcpAllowlist;
 }
 
 export const DEFAULT_CONFIG: PersistentSubagentConfig = {
@@ -42,6 +45,7 @@ export const DEFAULT_CONFIG: PersistentSubagentConfig = {
   inheritParentModel: false,
   inheritParentThinking: true,
   roles: {},
+  workerMcpAllowlist: {},
 };
 
 export interface LoadedConfig {
@@ -54,7 +58,7 @@ type PartialConfig = Partial<Omit<PersistentSubagentConfig, 'roles'>> & { roles?
 const TOP_LEVEL_KEYS = new Set<keyof PersistentSubagentConfig>([
   'metricsWorkers', 'metricsMain', 'maxAgents', 'maxDepth', 'idleTtlMs', 'startupTimeoutMs', 'commandTimeoutMs', 'shutdownGraceMs',
   'notifyOnSettled', 'notificationMaxChars', 'inheritParentProvider', 'inheritParentModel',
-  'inheritParentThinking', 'roles',
+  'inheritParentThinking', 'roles', 'workerMcpAllowlist',
 ]);
 const ROLE_KEYS = new Set<keyof RoleConfig>(['provider', 'model', 'thinking']);
 
@@ -73,7 +77,7 @@ export async function loadConfig(cwd: string, agentDir: string): Promise<LoadedC
 }
 
 function cloneConfig(config: PersistentSubagentConfig): PersistentSubagentConfig {
-  return { ...config, roles: Object.fromEntries(Object.entries(config.roles).map(([name, role]) => [name, { ...role }])) };
+  return { ...config, workerMcpAllowlist: { ...config.workerMcpAllowlist }, roles: Object.fromEntries(Object.entries(config.roles).map(([name, role]) => [name, { ...role }])) };
 }
 
 async function readConfigFile(path: string, label: string, warnings: string[]): Promise<PartialConfig | null> {
@@ -116,6 +120,8 @@ function validatePartialConfig(raw: unknown): PartialConfig {
   if ('inheritParentModel' in raw) result.inheritParentModel = booleanValue(raw.inheritParentModel, 'inheritParentModel');
   if ('inheritParentThinking' in raw) result.inheritParentThinking = booleanValue(raw.inheritParentThinking, 'inheritParentThinking');
 
+  if ('workerMcpAllowlist' in raw) result.workerMcpAllowlist = validateWorkerMcpAllowlist(raw.workerMcpAllowlist);
+
   if ('roles' in raw) {
     if (!isPlainObject(raw.roles)) throw new Error('roles must be an object');
     const roles: Record<string, RoleConfig> = {};
@@ -146,7 +152,8 @@ function mergeConfig(base: PersistentSubagentConfig, patch: PartialConfig): Pers
   if (patch.roles) {
     for (const [name, role] of Object.entries(patch.roles)) mergedRoles[name] = { ...(base.roles[name] ?? {}), ...role };
   }
-  return { ...base, ...patch, roles: mergedRoles } as PersistentSubagentConfig;
+  const workerMcpAllowlist = mergeWorkerMcpAllowlists(base.workerMcpAllowlist, patch.workerMcpAllowlist ?? {});
+  return { ...base, ...patch, roles: mergedRoles, workerMcpAllowlist } as PersistentSubagentConfig;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

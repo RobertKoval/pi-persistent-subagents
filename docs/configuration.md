@@ -7,7 +7,7 @@ Files are loaded in this order:
 1. `<PI_CODING_AGENT_DIR or ~/.pi/agent>/persistent-subagents/config.json`
 2. `<project>/.pi/persistent-subagents.json`
 
-Project settings override global settings. Role maps merge by role name. An invalid file is rejected as a whole with a warning; valid settings from the other level remain in effect.
+Project settings override global settings. Role maps merge by role name, and `workerMcpAllowlist` merges by MCP server name. An invalid file is rejected as a whole with a warning; valid settings from the other level remain in effect.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
@@ -25,6 +25,7 @@ Project settings override global settings. Role maps merge by role name. An inva
 | `inheritParentModel` | `false` | Use an explicit/role model; absent one, let child Pi select its default. Set true to inherit the parent model. |
 | `inheritParentThinking` | `true` | Inherit the parent's thinking level unless overridden. |
 | `roles` | `{}` | Named provider/model/thinking profiles. |
+| `workerMcpAllowlist` | `{}` | Per MCP server, the tools workers may call. See [Worker MCP allowlist](#worker-mcp-allowlist). |
 
 ## Selection
 
@@ -45,6 +46,26 @@ For pi-accounts 0.51, the extension copies only its version-1 named selection me
 `maxDepth: 1` allows the manager to spawn workers and hides this extension's lifecycle tools at child depth. Raising the limit does not install the extension into child Pi instances; ensure child extension discovery is configured if you want nested teams.
 
 Completion messages contain worker IDs, result IDs and status, without output, task text or usage. While the manager is busy, the extension retains pending completions locally instead of inserting follow-ups into Pi’s queue. Once the manager is idle, unread, unannounced completions produce one batched wake-up. A result returned by wait_agent is removed from pending delivery, so an obsolete event cannot wake the manager again. The manager can retrieve the result with `wait_agent` when needed. Set `notifyOnSettled: false` if you prefer explicit polling. Keeping `idleTtlMs: 0` avoids losing process continuity between related tasks.
+
+## Worker MCP allowlist
+
+Workers share the parent's MCP servers. To keep a server read-only for workers, for example a shared memory that only the manager should write to, list the tools workers may call:
+
+```json
+{
+  "workerMcpAllowlist": {
+    "hindsight": ["recall", "search_pages", "get_*", "list_*"]
+  }
+}
+```
+
+In every worker, any other tool of a listed server is blocked before it runs, and the worker is told to return its finding to the manager instead. A tool the server adds later is blocked until you list it. An empty list closes the server to workers. Servers that are not listed, other tools and the manager itself are not affected.
+
+Names follow Pi's MCP naming: `*` matches any characters, and characters other than letters, digits and `_` count as `_`, so `get-page` and `get_page` name the same tool. Calls from `codemode` scripts are checked too.
+
+The root session's allowlist applies to every worker generation. It travels to workers in the `PI_PERSISTENT_WORKER_MCP_ALLOWLIST` environment variable, and each worker loads the gate with `-e`, so enforcement does not depend on the child discovering this package. A worker's own configuration cannot loosen it. If a worker receives an unreadable value, it blocks every MCP tool. If a configuration file is invalid, it is ignored with a warning like any other setting, so workers then run without the allowlist from that file.
+
+The gate checks tool names from Pi's built-in MCP support. An extension that replaces it, such as `pi-mcp-adapter`, names tools differently and is not covered.
 
 ## Metrics
 
