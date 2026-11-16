@@ -6,8 +6,6 @@ export interface PiRpcArgSpec {
   provider?: string;
   model?: string;
   thinking?: string;
-  /** Extension files every worker must load, in addition to the ones it discovers. */
-  extensions?: readonly string[];
 }
 
 export interface InvocationRuntime {
@@ -21,7 +19,6 @@ export function buildPiRpcArgs(spec: PiRpcArgSpec): string[] {
   if (spec.provider) args.push('--provider', spec.provider);
   if (spec.model) args.push('--model', spec.model);
   if (spec.thinking) args.push('--thinking', spec.thinking);
-  for (const extension of spec.extensions ?? []) args.push('-e', extension);
   return args;
 }
 

@@ -102,8 +102,6 @@ The shared SQLite database contains metrics only, without prompts, responses or 
 
 Workers have the same OS permissions as Pi and share a working directory unless you override `cwd`. There is no automatic sandbox or Git worktree isolation. Coordinate edits to shared files.
 
-Workers also share the parent's MCP servers. To keep a server read-only for workers, such as a shared memory only the manager should write to, set [`workerMcpAllowlist`](docs/configuration.md#worker-mcp-allowlist).
-
 By default, workers do not create another generation of this extension's workers. The depth limit applies to this extension; it does not disable unrelated installed tools. Sessions and results are local data, retained for resume—not automatically deleted on shutdown.
 
 ## Development

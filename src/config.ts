@@ -1,6 +1,5 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { mergeWorkerMcpAllowlists, validateWorkerMcpAllowlist, type WorkerMcpAllowlist } from './worker-mcp-gate.ts';
 
 export const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 export type ThinkingLevelName = (typeof THINKING_LEVELS)[number];
@@ -26,8 +25,6 @@ export interface PersistentSubagentConfig {
   inheritParentModel: boolean;
   inheritParentThinking: boolean;
   roles: Record<string, RoleConfig>;
-  /** Per MCP server, the tools workers may call; other tools of a listed server are blocked in workers. */
-  workerMcpAllowlist: WorkerMcpAllowlist;
 }
 
 export const DEFAULT_CONFIG: PersistentSubagentConfig = {
@@ -45,7 +42,6 @@ export const DEFAULT_CONFIG: PersistentSubagentConfig = {
   inheritParentModel: false,
   inheritParentThinking: true,
   roles: {},
-  workerMcpAllowlist: {},
 };
 
 export interface LoadedConfig {
@@ -58,7 +54,7 @@ type PartialConfig = Partial<Omit<PersistentSubagentConfig, 'roles'>> & { roles?
 const TOP_LEVEL_KEYS = new Set<keyof PersistentSubagentConfig>([
   'metricsWorkers', 'metricsMain', 'maxAgents', 'maxDepth', 'idleTtlMs', 'startupTimeoutMs', 'commandTimeoutMs', 'shutdownGraceMs',
   'notifyOnSettled', 'notificationMaxChars', 'inheritParentProvider', 'inheritParentModel',
-  'inheritParentThinking', 'roles', 'workerMcpAllowlist',
+  'inheritParentThinking', 'roles',
 ]);
 const ROLE_KEYS = new Set<keyof RoleConfig>(['provider', 'model', 'thinking']);
 
@@ -71,17 +67,13 @@ export async function loadConfig(cwd: string, agentDir: string): Promise<LoadedC
   const global = await readConfigFile(globalPath, 'global', warnings);
   if (global) config = mergeConfig(config, global);
   const project = await readConfigFile(projectPath, 'project', warnings);
-  if (project) {
-    config = mergeConfig(config, project, (server) => warnings.push(
-      `project config ${projectPath}: workerMcpAllowlist.${server} was ignored; a project can add servers or close a listed one with [], but cannot replace the global allowlist`,
-    ));
-  }
+  if (project) config = mergeConfig(config, project);
 
   return { config, warnings };
 }
 
 function cloneConfig(config: PersistentSubagentConfig): PersistentSubagentConfig {
-  return { ...config, workerMcpAllowlist: { ...config.workerMcpAllowlist }, roles: Object.fromEntries(Object.entries(config.roles).map(([name, role]) => [name, { ...role }])) };
+  return { ...config, roles: Object.fromEntries(Object.entries(config.roles).map(([name, role]) => [name, { ...role }])) };
 }
 
 async function readConfigFile(path: string, label: string, warnings: string[]): Promise<PartialConfig | null> {
@@ -124,8 +116,6 @@ function validatePartialConfig(raw: unknown): PartialConfig {
   if ('inheritParentModel' in raw) result.inheritParentModel = booleanValue(raw.inheritParentModel, 'inheritParentModel');
   if ('inheritParentThinking' in raw) result.inheritParentThinking = booleanValue(raw.inheritParentThinking, 'inheritParentThinking');
 
-  if ('workerMcpAllowlist' in raw) result.workerMcpAllowlist = validateWorkerMcpAllowlist(raw.workerMcpAllowlist);
-
   if ('roles' in raw) {
     if (!isPlainObject(raw.roles)) throw new Error('roles must be an object');
     const roles: Record<string, RoleConfig> = {};
@@ -151,14 +141,12 @@ function validatePartialConfig(raw: unknown): PartialConfig {
   return result;
 }
 
-function mergeConfig(base: PersistentSubagentConfig, patch: PartialConfig, onIgnoredAllowlist: (server: string) => void = () => {}): PersistentSubagentConfig {
+function mergeConfig(base: PersistentSubagentConfig, patch: PartialConfig): PersistentSubagentConfig {
   const mergedRoles: Record<string, RoleConfig> = { ...base.roles };
   if (patch.roles) {
     for (const [name, role] of Object.entries(patch.roles)) mergedRoles[name] = { ...(base.roles[name] ?? {}), ...role };
   }
-  const { allowlist: workerMcpAllowlist, ignored } = mergeWorkerMcpAllowlists(base.workerMcpAllowlist, patch.workerMcpAllowlist ?? {});
-  ignored.forEach(onIgnoredAllowlist);
-  return { ...base, ...patch, roles: mergedRoles, workerMcpAllowlist } as PersistentSubagentConfig;
+  return { ...base, ...patch, roles: mergedRoles } as PersistentSubagentConfig;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
