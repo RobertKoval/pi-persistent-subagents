@@ -3,7 +3,7 @@ import extension from '../../src/index.ts';
 export default function probe(pi: any) {
   const tools = new Map<string, any>();
   const workers = new Map<number, PersistentPiRpcClient>();
-  const rpcLog: {pid?:number;command:unknown;phase:string}[]=[];
+  const rpcLog: {pid?:number;command:unknown;behavior?:unknown;phase:string}[]=[];
   const start=PersistentPiRpcClient.prototype.start;
   if(process.env.PI_METRICS_TEST_TRUST_PROJECT==='1')PersistentPiRpcClient.prototype.start=function(){
     // This opt-in harness owns a temporary project and its tiny compaction threshold.
@@ -12,9 +12,9 @@ export default function probe(pi: any) {
   const request=PersistentPiRpcClient.prototype.request;
   PersistentPiRpcClient.prototype.request=async function(command) {
     if(this.pid())workers.set(this.pid()!,this);
-    rpcLog.push({pid:this.pid(),command:command.type,phase:'send'});
+    rpcLog.push({pid:this.pid(),command:command.type,behavior:command.streamingBehavior,phase:'send'});
     const result=await request.call(this,command);
-    rpcLog.push({pid:this.pid(),command:command.type,phase:'accepted'});
+    rpcLog.push({pid:this.pid(),command:command.type,behavior:command.streamingBehavior,phase:'accepted'});
     return result;
   };
   extension(new Proxy(pi, { get(target, key) {

@@ -1,16 +1,35 @@
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 
 export const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 export type ThinkingLevelName = (typeof THINKING_LEVELS)[number];
 
-export interface RoleConfig {
+/** Parent's expectation of whether a worker will be reused; steers Pi's idle cache warming in the worker. */
+export const REUSE_POLICIES = ['one_shot', 'likely_soon', 'long_lived'] as const;
+export type ReusePolicy = (typeof REUSE_POLICIES)[number];
+/** Provider prompt-cache retention for a worker's requests (Pi's PI_CACHE_RETENTION). */
+export const CACHE_RETENTIONS = ['default', 'long'] as const;
+export type CacheRetention = (typeof CACHE_RETENTIONS)[number];
+/** Below this a compacted worker would immediately exceed its budget again (Pi keeps ~20k recent tokens). */
+export const MIN_CONTEXT_BUDGET_TOKENS = 32_768;
+export const MAX_CONTEXT_BUDGET_TOKENS = 10_000_000;
+
+export interface WorkerPolicy {
+  contextBudgetTokens?: number;
+  reuse?: ReusePolicy;
+  cacheRetention?: CacheRetention;
+}
+
+export interface RoleConfig extends WorkerPolicy {
   provider?: string;
   model?: string;
   thinking?: ThinkingLevelName;
+  description?: string;
+  /** Extra Pi extensions (-e) for workers of this role. Global config only: they run host code. */
+  extensions?: string[];
 }
 
-export interface PersistentSubagentConfig {
+export interface PersistentSubagentConfig extends WorkerPolicy {
   metricsWorkers: boolean;
   metricsMain: boolean;
   maxAgents: number;
@@ -19,6 +38,9 @@ export interface PersistentSubagentConfig {
   startupTimeoutMs: number;
   commandTimeoutMs: number;
   shutdownGraceMs: number;
+  compactionTimeoutMs: number;
+  /** Extra Pi extensions (-e) for every worker. Global config only: they run host code. */
+  workerExtensions: string[];
   notifyOnSettled: boolean;
   notificationMaxChars: number;
   inheritParentProvider: boolean;
@@ -35,7 +57,10 @@ export const DEFAULT_CONFIG: PersistentSubagentConfig = {
   idleTtlMs: 0,
   startupTimeoutMs: 15_000,
   commandTimeoutMs: 30_000,
-  shutdownGraceMs: 1_500,
+  // Pi finishes shutdown work such as an OAuth refresh before exiting; SIGKILL is only the last resort.
+  shutdownGraceMs: 10_000,
+  compactionTimeoutMs: 600_000,
+  workerExtensions: [],
   notifyOnSettled: true,
   notificationMaxChars: 4_000,
   inheritParentProvider: true,
@@ -50,13 +75,16 @@ export interface LoadedConfig {
 }
 
 type PartialConfig = Partial<Omit<PersistentSubagentConfig, 'roles'>> & { roles?: Record<string, RoleConfig> };
+type ConfigSource = 'global' | 'project';
 
 const TOP_LEVEL_KEYS = new Set<keyof PersistentSubagentConfig>([
   'metricsWorkers', 'metricsMain', 'maxAgents', 'maxDepth', 'idleTtlMs', 'startupTimeoutMs', 'commandTimeoutMs', 'shutdownGraceMs',
-  'notifyOnSettled', 'notificationMaxChars', 'inheritParentProvider', 'inheritParentModel',
-  'inheritParentThinking', 'roles',
+  'compactionTimeoutMs', 'workerExtensions', 'notifyOnSettled', 'notificationMaxChars', 'inheritParentProvider', 'inheritParentModel',
+  'inheritParentThinking', 'contextBudgetTokens', 'reuse', 'cacheRetention', 'roles',
 ]);
-const ROLE_KEYS = new Set<keyof RoleConfig>(['provider', 'model', 'thinking']);
+const ROLE_KEYS = new Set<keyof RoleConfig>([
+  'provider', 'model', 'thinking', 'description', 'extensions', 'contextBudgetTokens', 'reuse', 'cacheRetention',
+]);
 
 export async function loadConfig(cwd: string, agentDir: string): Promise<LoadedConfig> {
   const warnings: string[] = [];
@@ -73,10 +101,14 @@ export async function loadConfig(cwd: string, agentDir: string): Promise<LoadedC
 }
 
 function cloneConfig(config: PersistentSubagentConfig): PersistentSubagentConfig {
-  return { ...config, roles: Object.fromEntries(Object.entries(config.roles).map(([name, role]) => [name, { ...role }])) };
+  return {
+    ...config,
+    workerExtensions: [...config.workerExtensions],
+    roles: Object.fromEntries(Object.entries(config.roles).map(([name, role]) => [name, { ...role, ...(role.extensions ? { extensions: [...role.extensions] } : {}) }])),
+  };
 }
 
-async function readConfigFile(path: string, label: string, warnings: string[]): Promise<PartialConfig | null> {
+async function readConfigFile(path: string, label: ConfigSource, warnings: string[]): Promise<PartialConfig | null> {
   let text: string;
   try {
     text = await readFile(path, 'utf8');
@@ -88,14 +120,14 @@ async function readConfigFile(path: string, label: string, warnings: string[]): 
 
   try {
     const raw: unknown = JSON.parse(text);
-    return validatePartialConfig(raw);
+    return validatePartialConfig(raw, label);
   } catch (error) {
     warnings.push(`${label} config ${path} is invalid and was ignored: ${error instanceof Error ? error.message : String(error)}`);
     return null;
   }
 }
 
-function validatePartialConfig(raw: unknown): PartialConfig {
+function validatePartialConfig(raw: unknown, source: ConfigSource): PartialConfig {
   if (!isPlainObject(raw)) throw new Error('configuration must be a JSON object');
   for (const key of Object.keys(raw)) {
     if (!TOP_LEVEL_KEYS.has(key as keyof PersistentSubagentConfig)) throw new Error(`unknown field "${key}"`);
@@ -110,6 +142,9 @@ function validatePartialConfig(raw: unknown): PartialConfig {
   if ('startupTimeoutMs' in raw) result.startupTimeoutMs = integerInRange(raw.startupTimeoutMs, 'startupTimeoutMs', 100, 300_000);
   if ('commandTimeoutMs' in raw) result.commandTimeoutMs = integerInRange(raw.commandTimeoutMs, 'commandTimeoutMs', 100, 3_600_000);
   if ('shutdownGraceMs' in raw) result.shutdownGraceMs = integerInRange(raw.shutdownGraceMs, 'shutdownGraceMs', 0, 60_000);
+  if ('compactionTimeoutMs' in raw) result.compactionTimeoutMs = integerInRange(raw.compactionTimeoutMs, 'compactionTimeoutMs', 1_000, 3_600_000);
+  if ('workerExtensions' in raw) result.workerExtensions = extensionList(raw.workerExtensions, 'workerExtensions', source);
+  Object.assign(result, workerPolicy(raw, ''));
   if ('notificationMaxChars' in raw) result.notificationMaxChars = integerInRange(raw.notificationMaxChars, 'notificationMaxChars', 256, 100_000);
   if ('notifyOnSettled' in raw) result.notifyOnSettled = booleanValue(raw.notifyOnSettled, 'notifyOnSettled');
   if ('inheritParentProvider' in raw) result.inheritParentProvider = booleanValue(raw.inheritParentProvider, 'inheritParentProvider');
@@ -125,8 +160,10 @@ function validatePartialConfig(raw: unknown): PartialConfig {
       for (const key of Object.keys(value)) {
         if (!ROLE_KEYS.has(key as keyof RoleConfig)) throw new Error(`unknown field "roles.${name}.${key}"`);
       }
-      const role: RoleConfig = {};
+      const role: RoleConfig = workerPolicy(value, `roles.${name}.`);
       if ('provider' in value) role.provider = nonEmptyString(value.provider, `roles.${name}.provider`);
+      if ('description' in value) role.description = nonEmptyString(value.description, `roles.${name}.description`);
+      if ('extensions' in value) role.extensions = extensionList(value.extensions, `roles.${name}.extensions`, source);
       if ('model' in value) role.model = nonEmptyString(value.model, `roles.${name}.model`);
       if ('thinking' in value) {
         const level = nonEmptyString(value.thinking, `roles.${name}.thinking`);
@@ -147,6 +184,34 @@ function mergeConfig(base: PersistentSubagentConfig, patch: PartialConfig): Pers
     for (const [name, role] of Object.entries(patch.roles)) mergedRoles[name] = { ...(base.roles[name] ?? {}), ...role };
   }
   return { ...base, ...patch, roles: mergedRoles } as PersistentSubagentConfig;
+}
+
+function workerPolicy(raw: Record<string, unknown>, prefix: string): WorkerPolicy {
+  const policy: WorkerPolicy = {};
+  if ('contextBudgetTokens' in raw) {
+    policy.contextBudgetTokens = integerInRange(raw.contextBudgetTokens, `${prefix}contextBudgetTokens`, MIN_CONTEXT_BUDGET_TOKENS, MAX_CONTEXT_BUDGET_TOKENS);
+  }
+  if ('reuse' in raw) policy.reuse = oneOf(raw.reuse, `${prefix}reuse`, REUSE_POLICIES);
+  if ('cacheRetention' in raw) policy.cacheRetention = oneOf(raw.cacheRetention, `${prefix}cacheRetention`, CACHE_RETENTIONS);
+  return policy;
+}
+
+function extensionList(value: unknown, name: string, source: ConfigSource): string[] {
+  // A project file is repository content; letting it name code for workers to load would bypass Pi's project trust.
+  if (source !== 'global') throw new Error(`${name} may only be set in the global config, because workers load and run those extensions`);
+  if (!Array.isArray(value)) throw new Error(`${name} must be an array of extension paths`);
+  return value.map((entry, index) => {
+    const path = nonEmptyString(entry, `${name}[${index}]`);
+    if (!isAbsolute(path) && !/^builtin:[a-z0-9.-]+$/i.test(path)) {
+      throw new Error(`${name}[${index}] must be an absolute path or builtin:<name>, got "${path}"`);
+    }
+    return path;
+  });
+}
+
+function oneOf<T extends string>(value: unknown, name: string, allowed: readonly T[]): T {
+  if (typeof value !== 'string' || !allowed.includes(value as T)) throw new Error(`${name} must be one of ${allowed.join(', ')}`);
+  return value as T;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

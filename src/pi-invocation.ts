@@ -6,6 +6,7 @@ export interface PiRpcArgSpec {
   provider?: string;
   model?: string;
   thinking?: string;
+  extensions?: readonly string[];
 }
 
 export interface InvocationRuntime {
@@ -19,6 +20,7 @@ export function buildPiRpcArgs(spec: PiRpcArgSpec): string[] {
   if (spec.provider) args.push('--provider', spec.provider);
   if (spec.model) args.push('--model', spec.model);
   if (spec.thinking) args.push('--thinking', spec.thinking);
+  for (const extension of spec.extensions ?? []) args.push('-e', extension);
   return args;
 }
 

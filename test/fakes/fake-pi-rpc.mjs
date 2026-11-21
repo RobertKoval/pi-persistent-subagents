@@ -16,6 +16,12 @@ let isStreaming = false;
 let lastAssistantText = null;
 let timer = null;
 let history = [];
+// Queued prompts run inside the current session-level run, as in Pi: one agent_settled after the queue drains.
+let steering = [];
+let followUps = [];
+let contextTokens = Number(process.env.FAKE_CONTEXT_TOKENS ?? 1000);
+const contextWindow = Number(process.env.FAKE_CONTEXT_WINDOW ?? 200000);
+let compactions = 0;
 
 if (sessionFile) {
   fs.mkdirSync(path.dirname(sessionFile), { recursive: true });
@@ -64,7 +70,11 @@ function complete(message, prefix = 'ECHO') {
   }
   if (message === '__PROVIDER_ERROR__') {
     write({type:'message_end',message:{role:'assistant',content:[],stopReason:'error',errorMessage:'The usage limit has been reached',usage:{input:0,output:0,cacheRead:0,cacheWrite:0}}});
-    isStreaming=false; write({type:'agent_settled'}); return;
+    isStreaming=false; write({type:'agent_settled', aborted: false}); return;
+  }
+  if (message === '__RETRY_THEN_OK__') {
+    write({type:'message_end',message:{role:'assistant',content:[],stopReason:'error',errorMessage:'overloaded',usage:{input:0,output:0,cacheRead:0,cacheWrite:0}}});
+    message = 'recovered';
   }
   let text;
   if (message === '__APP_ATTRIBUTION__') {
@@ -76,11 +86,16 @@ function complete(message, prefix = 'ECHO') {
   }
   lastAssistantText = text;
   persistTurn(message, text);
-  write({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text }], usage: { input: 10, output: 3, cacheRead: history.length > 1 ? 7 : 0, cacheWrite: 0, totalTokens: 13, cost: { total: 0 } } } });
+  write({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text }], stopReason: 'stop', usage: { input: 10, output: 3, cacheRead: history.length > 1 ? 7 : 0, cacheWrite: 0, totalTokens: 13, cost: { total: 0.001 } } } });
+  const next = steering.shift() ?? followUps.shift();
+  if (next) {
+    timer = setTimeout(() => { timer = null; complete(next.message, next.prefix); }, 15);
+    return;
+  }
   isStreaming = false;
   write({ type: 'agent_end', messages: [] });
-  write({ type: 'agent_settled' });
-  if (message === '__DUPLICATE_SETTLED__') write({type:'agent_settled'});
+  write({ type: 'agent_settled', aborted: false });
+  if (message === '__DUPLICATE_SETTLED__') write({type:'agent_settled', aborted: false});
 }
 
 function startTurn(message, prefix = 'ECHO', delay = 15) {
@@ -117,42 +132,61 @@ async function handle(cmd) {
       break;
     case 'prompt':
       if (cmd.message === '__WAIT_FOR_ACK__') break;
-      if (isStreaming && !cmd.streamingBehavior) {
-        response(cmd, false, undefined, 'prompt requires streamingBehavior while streaming');
+      if (cmd.message.startsWith('__SET_CONTEXT__:')) {
+        contextTokens = Number(cmd.message.slice('__SET_CONTEXT__:'.length));
+        response(cmd, true, { disposition: 'handled' });
         break;
       }
-      response(cmd, true, {});
-      startTurn(cmd.message, 'ECHO', cmd.message === '__WAIT_UI__' ? 1400 : cmd.message === '__SLOW__' ? 350 : 15);
-      break;
-    case 'steer':
-      response(cmd, true, {});
-      if (timer) {
-        clearTimeout(timer);
-        timer = null;
+      if (cmd.message.startsWith('/')) {
+        response(cmd, true, { disposition: 'handled' });
+        break;
       }
-      startTurn(cmd.message, 'STEER', 15);
-      break;
-    case 'follow_up':
-      response(cmd, true, {});
       if (isStreaming) {
-        const poll = setInterval(() => {
-          if (!isStreaming) {
-            clearInterval(poll);
-            startTurn(cmd.message, 'FOLLOW', 15);
-          }
-        }, 5);
-      } else {
-        startTurn(cmd.message, 'FOLLOW', 15);
+        if (!cmd.streamingBehavior) {
+          response(cmd, false, undefined, 'prompt requires streamingBehavior while streaming');
+          break;
+        }
+        response(cmd, true, { disposition: 'queued' });
+        if (cmd.streamingBehavior === 'steer') {
+          // Steering replaces the remaining work of the current turn in this fake.
+          if (timer) { clearTimeout(timer); timer = null; }
+          timer = setTimeout(() => { timer = null; complete(cmd.message, 'STEER'); }, 15);
+        } else {
+          followUps.push({ message: cmd.message, prefix: 'FOLLOW' });
+        }
+        break;
       }
+      response(cmd, true, { disposition: 'started' });
+      startTurn(cmd.message, 'ECHO', cmd.message === '__WAIT_UI__' ? 1400 : cmd.message === '__SLOW__' ? 350 : 15);
       break;
     case 'abort':
       if (timer) {
         clearTimeout(timer);
         timer = null;
       }
-      isStreaming = false;
+      steering = [];
+      followUps = [];
+      if (isStreaming) {
+        isStreaming = false;
+        write({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'PARTIAL' }], stopReason: 'aborted', usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } } } });
+        write({ type: 'agent_end', messages: [] });
+        // Pi emits the aborted settle before answering abort.
+        write({ type: 'agent_settled', aborted: true });
+      }
       response(cmd, true, {});
-      write({ type: 'agent_settled' });
+      break;
+    case 'get_session_stats':
+      response(cmd, true, {
+        sessionId: `fake-${process.pid}`,
+        cost: history.length * 0.001,
+        contextUsage: { tokens: contextTokens, contextWindow, percent: contextTokens / contextWindow * 100 },
+      });
+      break;
+    case 'compact':
+      if (history.length === 0) { response(cmd, false, undefined, 'Nothing to compact (session too small)'); break; }
+      compactions++;
+      response(cmd, true, { tokensBefore: contextTokens, estimatedTokensAfter: 500, usage: { cost: { total: 0.01 } }, compactions });
+      contextTokens = 500;
       break;
     default:
       response(cmd, false, undefined, `unknown command: ${cmd.type}`);

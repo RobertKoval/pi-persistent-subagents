@@ -9,14 +9,17 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
-import { loadConfig, type PersistentSubagentConfig } from './config.ts';
+import { CACHE_RETENTIONS, MAX_CONTEXT_BUDGET_TOKENS, MIN_CONTEXT_BUDGET_TOKENS, REUSE_POLICIES, loadConfig, type PersistentSubagentConfig } from './config.ts';
 import { buildPiRpcArgs, resolvePiInvocation } from './pi-invocation.ts';
 import {
+  WORKER_ENV,
   WorkerPool,
+  parentScope,
   type PiInvocationFactory,
   type SendMode,
   type WorkerSnapshot,
 } from './pool.ts';
+import { WorkerCostLedger, costStatus, sessionCost } from './session-cost.ts';
 
 const TOOL_NAMES = ['spawn_agent', 'send_input', 'wait_agent', 'list_agents', 'close_agent', 'resume_agent'] as const;
 const SEND_MODES = ['auto', 'steer', 'follow_up', 'interrupt'] as const;
@@ -35,6 +38,13 @@ const SEND_MODE_SCHEMA = Type.Union([
   Type.Literal('follow_up'),
   Type.Literal('interrupt'),
 ]);
+const REUSE_SCHEMA = Type.Union(REUSE_POLICIES.map(p => Type.Literal(p)), {
+  description: 'Expected reuse. one_shot stops Pi idle prompt-cache warming for this worker; likely_soon and long_lived leave it to Pi.',
+});
+const CACHE_RETENTION_SCHEMA = Type.Union(CACHE_RETENTIONS.map(p => Type.Literal(p)), {
+  description: 'long requests extended provider prompt caching (Pi PI_CACHE_RETENTION) where the provider supports it.',
+});
+const STATUS_KEY = 'persistent-subagents';
 
 interface PoolBundle {
   sessionId: string;
@@ -43,10 +53,15 @@ interface PoolBundle {
   depth: number;
   inbox: CompletionInbox;
   metrics: MetricsAdapter;
+  costs: WorkerCostLedger;
   panel?: MetricsPanel;
 }
 
 export default function persistentSubagentsExtension(pi: ExtensionAPI) {
+  // Worker side: the parent knows this worker will not be called again, so a cache refresh cannot pay off.
+  if (parseDepth(process.env[WORKER_ENV.depth]) > 0 && process.env[WORKER_ENV.reuse] === 'one_shot') {
+    pi.on('cache_warming_decision', () => ({ action: 'stop' }));
+  }
   let bundlePromise: Promise<PoolBundle> | null = null;
   let bundleSessionId: string | null = null;
   const inheritedAttribution = attribution(process.env[ATTRIBUTION_ENV] ? JSON.parse(process.env[ATTRIBUTION_ENV]!) : {});
@@ -63,13 +78,17 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
     pendingHeaders = undefined;
   });
 
-  const currentParent = (ctx: ExtensionContext) => ({
-    models: ctx.modelRegistry?.getAll().map(({provider, id}) => ({provider, id})),
-    provider: ctx.model?.provider,
-    model: ctx.model?.id,
-    thinking: ctx.thinkingLevel,
-    cwd: ctx.cwd,
-  });
+  const currentParent = (ctx: ExtensionContext) => {
+    const settings = pi.getSettings();
+    return {
+      models: ctx.modelRegistry?.getAll().map(({provider, id}) => ({provider, id})),
+      provider: ctx.model?.provider,
+      model: ctx.model?.id,
+      thinking: ctx.thinkingLevel,
+      cwd: ctx.cwd,
+      defaults: { provider: settings.defaultProvider, model: settings.defaultModel },
+    };
+  };
 
   const createBundle = async (ctx: ExtensionContext): Promise<PoolBundle> => {
     const sessionId = ctx.sessionManager.getSessionId();
@@ -77,7 +96,7 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
     const loaded = await loadConfig(ctx.cwd, agentDir);
     for (const warning of loaded.warnings) ctx.ui.notify(`persistent-subagents: ${warning}`, 'warning');
 
-    const depth = parseDepth(process.env.PI_PERSISTENT_SUBAGENT_DEPTH);
+    const depth = parseDepth(process.env[WORKER_ENV.depth]);
     const invocationFactory: PiInvocationFactory = (spec) => {
       seedAccountSelection(spec.sessionFile, spec.cwd, ctx.sessionManager);
       const resolved = resolvePiInvocation(buildPiRpcArgs(spec));
@@ -96,7 +115,7 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
       }),
       observeWorker: (record, workerSession, api) => metrics.worker(record,workerSession,api),
       config: loaded.config,
-      storageRoot: join(agentDir, 'persistent-subagents'),
+      storageRoot: storageRoot(agentDir),
       parentSessionId: sessionId,
       parent: currentParent(ctx),
       currentDepth: depth,
@@ -116,7 +135,24 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
       }, { triggerTurn: true }),
     });
     pool.onSettled(snapshot => inbox.publish(snapshot));
-    return { sessionId, pool, config: loaded.config, depth, inbox, metrics };
+    const costs = new WorkerCostLedger(storageRoot(agentDir), parentScope);
+    const bundle: PoolBundle = { sessionId, pool, config: loaded.config, depth, inbox, metrics, costs };
+    if (depth === 0 && ctx.hasUI) pool.onUpdate(() => scheduleCostStatus(bundle, ctx));
+    return bundle;
+  };
+
+  // The footer total is recomputed from Pi's session files, so restarts, resumes and reloads never replay a charge.
+  let costTimer: ReturnType<typeof setTimeout> | undefined;
+  const scheduleCostStatus = (bundle: PoolBundle, ctx: ExtensionContext) => {
+    if (costTimer || bundle.depth !== 0 || !ctx.hasUI) return;
+    costTimer = setTimeout(() => {
+      costTimer = undefined;
+      void bundle.costs.workersOf(bundle.sessionId).then(workers => {
+        if (bundlePromise === null || bundleSessionId !== bundle.sessionId) return;
+        ctx.ui.setStatus(STATUS_KEY, costStatus(sessionCost(ctx.sessionManager.getEntries()), workers));
+      }, () => undefined);
+    }, 250);
+    costTimer.unref();
   };
 
   const ensurePool = async (ctx: ExtensionContext): Promise<PoolBundle> => {
@@ -145,6 +181,8 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
   };
 
   const cleanupCurrent = async (): Promise<void> => {
+    if (costTimer) clearTimeout(costTimer);
+    costTimer = undefined;
     const current = bundlePromise;
     bundlePromise = null;
     bundleSessionId = null;
@@ -164,18 +202,26 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
     promptSnippet: 'Start one persistent worker actor for a distinct ongoing role or workstream.',
     promptGuidelines: [
       'Reuse existing persistent workers with send_input for related follow-up work; do not respawn merely to issue a new task.',
-      'Use list_agents before spawning when you may already have a suitable worker.',
+      'Use list_agents before spawn_agent when you may already have a suitable worker; list_agents also shows the configured spawn_agent roles.',
       'Use wait_agent when you need worker results before deciding the next action.',
+      'Pass reuse="one_shot" to spawn_agent for a worker you will not call again after its first result.',
     ],
     executionMode: 'parallel',
     parameters: Type.Object({
       task: Type.String({ minLength: 1, description: 'Initial task/instruction.' }),
       name: Type.Optional(Type.String({ minLength: 1, description: 'Human-readable stable worker name.' })),
-      role: Type.Optional(Type.String({ minLength: 1, description: 'Configured role profile from persistent-subagents config.' })),
+      role: Type.Optional(Type.String({ minLength: 1, description: 'Configured role profile; list_agents shows the configured roles.' })),
       provider: Type.Optional(Type.String({ minLength: 1, description: 'Provider override. Usually omit to inherit current account/provider.' })),
       model: Type.Optional(Type.String({ minLength: 1, description: 'Model ID or provider/model override.' })),
       thinking: Type.Optional(THINKING_SCHEMA),
       cwd: Type.Optional(Type.String({ minLength: 1, description: 'Worker working directory; defaults to parent cwd.' })),
+      reuse: Type.Optional(REUSE_SCHEMA),
+      cache_retention: Type.Optional(CACHE_RETENTION_SCHEMA),
+      context_budget_tokens: Type.Optional(Type.Integer({
+        minimum: MIN_CONTEXT_BUDGET_TOKENS,
+        maximum: MAX_CONTEXT_BUDGET_TOKENS,
+        description: 'Soft context budget: before new input reaches an idle worker above it, the worker is compacted.',
+      })),
     }),
     execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
       const bundle = await ensurePool(ctx);
@@ -187,6 +233,9 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
         model: params.model,
         thinking: params.thinking,
         cwd: params.cwd,
+        reuse: params.reuse,
+        cacheRetention: params.cache_retention,
+        contextBudgetTokens: params.context_budget_tokens,
       });
       return toolResult(acknowledgement(snapshot, 'spawn'), snapshot);
     },
@@ -198,7 +247,7 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
     description:
       'Talk to an existing persistent worker without restarting it. auto sends a normal prompt when idle and steer when running; follow_up queues work; interrupt aborts current work before a fresh prompt.',
     promptSnippet: 'Continue or steer an already-running persistent worker.',
-    promptGuidelines: ['Keep the same worker for the same code area/role when continuity is useful.'],
+    promptGuidelines: ['Use send_input to keep the same worker for the same code area or role when continuity is useful.'],
     executionMode: 'parallel',
     parameters: Type.Object({
       id: Type.String({ minLength: 1, description: 'Worker ID from spawn_agent/list_agents.' }),
@@ -207,8 +256,12 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
     }),
     execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
       const bundle = await ensurePool(ctx);
-      const snapshot = await bundle.pool.sendInput(params.id, params.message, (params.mode ?? 'auto') as SendMode);
-      return toolResult(acknowledgement(snapshot, 'input'), snapshot);
+      const sent = await bundle.pool.sendInput(params.id, params.message, (params.mode ?? 'auto') as SendMode);
+      return toolResult(encode({
+        ...ackFields(sent.snapshot, 'input'),
+        disposition: sent.disposition,
+        ...(sent.compaction ? { budget_compaction: sent.compaction } : {}),
+      }), { ...sent.snapshot, disposition: sent.disposition, ...(sent.compaction ? { budgetCompaction: sent.compaction } : {}) });
     },
   });
 
@@ -267,14 +320,27 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: 'list_agents',
     label: 'List persistent agents',
-    description: 'List worker IDs, names, states, PIDs, models and errors in compact TOON. Use wait_agent for selected results; verbose adds full diagnostics and latest output.',
-    promptSnippet: 'Inspect persistent worker state before spawning redundant workers.',
-    parameters: Type.Object({verbose: Type.Optional(Type.Boolean({description: 'Include full metadata, usage and latest output.'}))}),
+    description: 'List worker IDs, names, states, PIDs, models and errors, plus the configured spawn_agent roles, in compact TOON. Use wait_agent for selected results; verbose adds full diagnostics, live context usage and latest output.',
+    promptSnippet: 'Inspect persistent worker state and available roles before spawning redundant workers.',
+    parameters: Type.Object({verbose: Type.Optional(Type.Boolean({description: 'Include full metadata, usage, context usage and latest output.'}))}),
     execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
       const bundle = await ensurePool(ctx);
       const agents = bundle.pool.listAgents();
-      if (params.verbose) bundle.inbox.consume(agents, false);
-      return toolResult(encode({agents: params.verbose ? simplifySnapshots(agents) : agents.map(s => ({id:s.id,name:s.name ?? s.role ?? null,status:s.status,pid:s.pid ?? null,model:modelLabel(s),error:s.error ?? null}))}), agents);
+      const roles = Object.entries(bundle.config.roles).map(([name, role]) => ({
+        name, description: role.description ?? null, model: [role.provider, role.model].filter(Boolean).join('/') || null,
+      }));
+      if (!params.verbose) {
+        return toolResult(encode({
+          agents: agents.map(s => ({id:s.id,name:s.name ?? s.role ?? null,status:s.status,pid:s.pid ?? null,model:modelLabel(s),error:s.error ?? null})),
+          ...(roles.length ? { roles } : {}),
+        }), agents);
+      }
+      bundle.inbox.consume(agents, false);
+      const contexts = await Promise.all(agents.map(a => bundle.pool.contextUsage(a.id).catch(() => undefined)));
+      return toolResult(encode({
+        agents: simplifySnapshots(agents).map((a, i) => ({ ...a, context: contextView(contexts[i], agents[i].contextBudgetTokens) })),
+        ...(roles.length ? { roles } : {}),
+      }), agents);
     },
   });
 
@@ -340,13 +406,19 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
 
   pi.on('session_start', async (_event, ctx) => {
     const bundle = await ensurePool(ctx);
+    scheduleCostStatus(bundle, ctx);
     if (bundle.depth >= bundle.config.maxDepth) {
       const active = pi.getActiveTools().filter((name) => !TOOL_NAMES.includes(name as (typeof TOOL_NAMES)[number]));
       pi.setActiveTools(active);
     }
   });
 
-  const track = async (data: {type:string}, ctx: ExtensionContext) => { (await ensurePool(ctx)).metrics.mainEvent(data,{provider:ctx.model?.provider,model:ctx.model?.id,api:ctx.model?.api}); };
+  const COST_EVENTS = new Set(['message_end', 'session_compact', 'agent_settled']);
+  const track = async (data: {type:string}, ctx: ExtensionContext) => {
+    const bundle = await ensurePool(ctx);
+    bundle.metrics.mainEvent(data,{provider:ctx.model?.provider,model:ctx.model?.id,api:ctx.model?.api});
+    if (COST_EVENTS.has(data.type)) scheduleCostStatus(bundle, ctx);
+  };
   pi.on('session_before_compact', track);
   pi.on('session_compact', track);
   pi.on('session_compact_failed', track);
@@ -363,6 +435,21 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
   pi.on('session_shutdown', async () => {
     await cleanupCurrent();
   });
+}
+
+function storageRoot(agentDir: string): string {
+  return join(agentDir, 'persistent-subagents');
+}
+
+function contextView(usage: { tokens: number | null; contextWindow: number } | undefined, budget: number | undefined) {
+  if (!usage) return budget === undefined ? null : { tokens: null, budget, native_window: null };
+  const limit = budget !== undefined ? Math.min(budget, usage.contextWindow) : usage.contextWindow;
+  return {
+    tokens: usage.tokens,
+    budget: budget ?? null,
+    native_window: usage.contextWindow,
+    headroom: usage.tokens === null ? null : limit - usage.tokens,
+  };
 }
 
 function getAgentDir(): string {
@@ -384,15 +471,19 @@ function modelLabel(snapshot: WorkerSnapshot): string | null {
   return snapshot.model ? [snapshot.provider, snapshot.model].filter(Boolean).join('/') : null;
 }
 
-function acknowledgement(snapshot: WorkerSnapshot, operation: 'spawn' | 'input' | 'close' | 'resume'): string {
-  return encode({
+function ackFields(snapshot: WorkerSnapshot, operation: 'spawn' | 'input' | 'close' | 'resume') {
+  return {
     id: snapshot.id,
     status: snapshot.status,
     ...(snapshot.pid !== undefined ? {pid:snapshot.pid} : {}),
     ...(operation === 'spawn' ? {model:modelLabel(snapshot)} : {}),
     ...(operation === 'resume' ? {cache_continuity:snapshot.cacheContinuity} : {}),
     ...(snapshot.error ? {error:snapshot.error} : {}),
-  });
+  };
+}
+
+function acknowledgement(snapshot: WorkerSnapshot, operation: 'spawn' | 'input' | 'close' | 'resume'): string {
+  return encode(ackFields(snapshot, operation));
 }
 
 function simplifySnapshots(snapshots: WorkerSnapshot[]) {
@@ -407,10 +498,14 @@ function simplifySnapshots(snapshots: WorkerSnapshot[]) {
     model: snapshot.model,
     thinking: snapshot.thinking,
     cache_continuity: snapshot.cacheContinuity,
+    reuse: snapshot.reuse,
+    cache_retention: snapshot.cacheRetention,
+    extensions: snapshot.extensions,
     session_file: snapshot.sessionFile,
     task: snapshot.taskPreview,
     usage: snapshot.usage,
     result_id: snapshot.completionId,
+    outcome: snapshot.outcome,
     last_output: snapshot.lastOutput,
     error: snapshot.error,
   }));
@@ -421,16 +516,17 @@ function humanAgentList(agents: WorkerSnapshot[]): string {
     const identity = [a.id, a.name, a.role].filter(Boolean).join(' · ');
     const process = a.pid ? `pid=${a.pid}` : 'no-process';
     const model = [a.provider, a.model].filter(Boolean).join('/');
-    return `${identity} — ${a.status} — ${process}${model ? ` — ${model}` : ''}${a.thinking ? ` — thinking=${a.thinking}` : ''} — ${a.cacheContinuity}`;
+    const policy = [a.reuse && `reuse=${a.reuse}`, a.contextBudgetTokens && `budget=${a.contextBudgetTokens}`, a.cacheRetention === 'long' && 'cache=long'].filter(Boolean).join(' ');
+    return `${identity} — ${a.status}${a.outcome && a.outcome !== 'completed' ? ` (${a.outcome})` : ''} — ${process}${model ? ` — ${model}` : ''}${a.thinking ? ` — thinking=${a.thinking}` : ''} — ${a.cacheContinuity}${policy ? ` — ${policy}` : ''}`;
   }).join('\n');
 }
 
 function resultSummary(snapshot: WorkerSnapshot) {
-  return {id:snapshot.id,status:snapshot.status,result_id:snapshot.completionId ?? null,error:snapshot.error ?? null,output:snapshot.lastOutput};
+  return {id:snapshot.id,status:snapshot.status,outcome:snapshot.outcome ?? null,result_id:snapshot.completionId ?? null,error:snapshot.error ?? null,output:snapshot.lastOutput};
 }
 
 function completionNotification(snapshots: WorkerSnapshot[]): string {
-  return snapshots.map(s => `Worker ${s.id}: ${s.error ? 'error' : s.status} (result ${s.completionId}).`).join('\n') + '\nUse wait_agent for unread results.';
+  return snapshots.map(s => `Worker ${s.id}: ${s.outcome ?? s.status} (result ${s.completionId}).`).join('\n') + '\nUse wait_agent for unread results.';
 }
 
 function metricsPath(agentDir:string):string {

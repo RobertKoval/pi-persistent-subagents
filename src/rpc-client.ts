@@ -13,6 +13,32 @@ export interface RpcState {
   [key: string]: unknown;
 }
 
+/** What Pi did with a submitted prompt (Pi >= 0.99): started a run, queued it into the current one, or handled it without a run. */
+export type PromptDisposition = 'started' | 'queued' | 'handled';
+const DISPOSITIONS: readonly PromptDisposition[] = ['started', 'queued', 'handled'];
+/** Pi's RPC names for queueing a prompt into a running session. */
+export type StreamingBehavior = 'steer' | 'followUp';
+
+export interface ContextUsage {
+  /** null right after compaction until the next assistant response reports usage. */
+  tokens: number | null;
+  contextWindow: number;
+  percent: number | null;
+}
+
+export interface SessionStats {
+  sessionId?: string;
+  /** Pi's own session total: assistant, tool, compaction, summary and cache-warming usage. */
+  cost: number;
+  contextUsage?: ContextUsage;
+}
+
+export interface CompactResult {
+  tokensBefore?: number;
+  estimatedTokensAfter?: number;
+  cost?: number;
+}
+
 export interface RpcResponse {
   id?: string;
   type: 'response';
@@ -145,7 +171,7 @@ export class PersistentPiRpcClient {
     return () => this.exitListeners.delete(listener);
   }
 
-  async request(command: Record<string, unknown>): Promise<RpcResponse> {
+  async request(command: Record<string, unknown>, timeoutOverrideMs?: number): Promise<RpcResponse> {
     if (this.stopping) throw new Error('Pi RPC client is stopping');
     const child = this.process;
     const stdin = child?.stdin;
@@ -156,7 +182,7 @@ export class PersistentPiRpcClient {
     }
 
     const id = `req_${++this.nextRequestId}`;
-    const timeoutMs = this.options.commandTimeoutMs ?? 30_000;
+    const timeoutMs = timeoutOverrideMs ?? this.options.commandTimeoutMs ?? 30_000;
     const response = await new Promise<RpcResponse>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
@@ -179,16 +205,17 @@ export class PersistentPiRpcClient {
     return response;
   }
 
-  async prompt(message: string): Promise<void> {
-    await this.request({ type: 'prompt', message });
-  }
-
-  async steer(message: string): Promise<void> {
-    await this.request({ type: 'steer', message });
-  }
-
-  async followUp(message: string): Promise<void> {
-    await this.request({ type: 'follow_up', message });
+  /**
+   * One atomic submission: Pi starts a run when idle and applies streamingBehavior only while a run is active,
+   * so there is no check-then-act race between reading state and choosing prompt or steer.
+   */
+  async prompt(message: string, streamingBehavior?: StreamingBehavior): Promise<PromptDisposition> {
+    const response = await this.request({ type: 'prompt', message, ...(streamingBehavior ? { streamingBehavior } : {}) });
+    const disposition = (response.data as { disposition?: unknown } | undefined)?.disposition;
+    if (!DISPOSITIONS.includes(disposition as PromptDisposition)) {
+      throw new Error(`Pi RPC prompt response has no valid disposition (got ${JSON.stringify(disposition)}); Pi >= 1.6 is required`);
+    }
+    return disposition as PromptDisposition;
   }
 
   async abort(): Promise<void> {
@@ -198,6 +225,28 @@ export class PersistentPiRpcClient {
   async getState(): Promise<RpcState> {
     const response = await this.request({ type: 'get_state' });
     return (response.data ?? {}) as RpcState;
+  }
+
+  async getSessionStats(): Promise<SessionStats> {
+    const data = (await this.request({ type: 'get_session_stats' })).data as Record<string, unknown> | undefined;
+    if (!data || typeof data.cost !== 'number' || !Number.isFinite(data.cost)) {
+      throw new Error('Pi RPC get_session_stats response has no numeric cost');
+    }
+    const usage = data.contextUsage as Record<string, unknown> | undefined;
+    const contextUsage = usage && typeof usage.contextWindow === 'number'
+      ? { tokens: typeof usage.tokens === 'number' ? usage.tokens : null, contextWindow: usage.contextWindow, percent: typeof usage.percent === 'number' ? usage.percent : null }
+      : undefined;
+    return { ...(typeof data.sessionId === 'string' ? { sessionId: data.sessionId } : {}), cost: data.cost, ...(contextUsage ? { contextUsage } : {}) };
+  }
+
+  /** Manual compaction; Pi aborts any active run first, so callers must only use it while the worker is idle. */
+  async compact(timeoutMs: number): Promise<CompactResult> {
+    const data = (await this.request({ type: 'compact' }, timeoutMs)).data as Record<string, any> | undefined;
+    return {
+      ...(typeof data?.tokensBefore === 'number' ? { tokensBefore: data.tokensBefore } : {}),
+      ...(typeof data?.estimatedTokensAfter === 'number' ? { estimatedTokensAfter: data.estimatedTokensAfter } : {}),
+      ...(typeof data?.usage?.cost?.total === 'number' ? { cost: data.usage.cost.total } : {}),
+    };
   }
 
   async getLastAssistantText(): Promise<string | null> {
@@ -246,13 +295,14 @@ export class PersistentPiRpcClient {
     const child = this.process;
     if (!child) return;
     this.stopping = true;
-    this.stopReading?.();
-    this.stopReading = null;
     this.rejectPending(new Error('Pi RPC client is stopping'));
 
     if (child.pid && child.exitCode === null && child.signalCode === null) {
+      // Pi's documented orderly shutdown: stdin EOF plus SIGTERM. Keep draining stdout meanwhile,
+      // because Pi honours stdout backpressure and a stalled pipe would turn a clean exit into SIGKILL.
+      child.stdin?.end();
       child.kill('SIGTERM');
-      const grace = this.options.shutdownGraceMs ?? 1_500;
+      const grace = this.options.shutdownGraceMs ?? 10_000;
       await new Promise<void>((resolve) => {
         let finished = false;
         const finish = () => {
@@ -269,6 +319,8 @@ export class PersistentPiRpcClient {
       });
     }
 
+    this.stopReading?.();
+    this.stopReading = null;
     child.stdin?.destroy();
     child.stdout?.destroy();
     child.stderr?.destroy();

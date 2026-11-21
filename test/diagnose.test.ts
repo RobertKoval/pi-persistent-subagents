@@ -13,25 +13,27 @@ describe('diagnose', () => {
       root,
       run: (command: string, args: string[]) => {
         calls.push({ command, args });
-        return { status: 0, stdout: '0.85.1\n', stderr: '' };
+        return { status: 0, stdout: '1.6.0\n', stderr: '' };
       },
       nodeVersion: 'v22.19.0',
     });
     assert.equal(result.node.ok, true);
     assert.equal(result.pi.found, true);
-    assert.equal(result.pi.version, '0.85.1');
+    assert.equal(result.pi.version, '1.6.0');
+    assert.equal(result.pi.compatible, true);
     assert.equal(result.files.missing.length, 0);
     assert.deepEqual(calls, [{ command: 'pi', args: ['--version'] }]);
     assert.equal(calls.some((call) => call.args.some((arg) => /prompt|message/i.test(arg))), false);
   });
 
-  it('reports an old/missing Pi rather than trying to install or repair it', async () => {
-    const old = await buildDiagnostic({
-      root,
-      run: () => ({ status: 0, stdout: '0.83.0\n', stderr: '' }),
-      nodeVersion: 'v22.19.0',
+  for (const [version, compatible] of [['1.5.2', false], ['1.6.0', true], ['1.7.3', true], ['2.0.0', false], ['0.85.1', false]] as const) {
+    it(`treats Pi ${version} as ${compatible ? 'inside' : 'outside'} the tested peer range`, async () => {
+      const result = await buildDiagnostic({ root, run: () => ({ status: 0, stdout: `${version}\n`, stderr: '' }), nodeVersion: 'v22.19.0' });
+      assert.equal(result.pi.compatible, compatible);
     });
-    assert.equal(old.pi.compatible, false);
+  }
+
+  it('reports a missing Pi rather than trying to install or repair it', async () => {
 
     const missing = await buildDiagnostic({
       root,

@@ -38,16 +38,17 @@ export async function buildDiagnostic(options = {}) {
   const piText = String(piResult.stdout ?? '').trim();
   const piVersion = parseVersionString(piText);
   const piFound = piResult.status === 0 && Boolean(piVersion);
-  const piCompatible = piFound && piVersion[0] === 0 && piVersion[1] === 85;
+  // The peer range ^1.6.0: any 1.x from 1.6 on; 2.x is untested.
+  const piCompatible = piFound && piVersion[0] === 1 && piVersion[1] >= 6;
 
   return {
-    package: { name: packageJson.name, version: packageJson.version, targetPi: '0.85.x' },
+    package: { name: packageJson.name, version: packageJson.version, targetPi: '^1.6.0' },
     node: { version: nodeVersion, ok: nodeOk, required: '>=22.19.0' },
     pi: {
       found: piFound,
       version: piVersion ? piVersion.join('.') : null,
       compatible: Boolean(piCompatible),
-      expected: '0.85.x',
+      expected: '^1.6.0',
       stderr: String(piResult.stderr ?? '').trim() || null,
     },
     files: { missing },

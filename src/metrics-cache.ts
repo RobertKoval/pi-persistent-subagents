@@ -1,5 +1,7 @@
 // Pi 0.85's reviewed adapters subtract cached reads/writes from OpenAI input,
-// while Anthropic already reports the three disjoint input categories.
+// while Anthropic already reports the three disjoint input categories. Re-verified
+// unchanged in Pi 1.6 (pi-ai openai-completions parseChunkUsage, openai-responses-shared),
+// so the stamp keeps its original name and old and new rows stay comparable.
 // Persist the interpretation with new observations; never infer it for old rows.
 const APIS: Record<string, readonly string[]> = {
   openai: ['openai-responses', 'openai-completions'],

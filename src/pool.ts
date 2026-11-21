@@ -1,9 +1,9 @@
 import { access, mkdir } from 'node:fs/promises';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import type { PersistentSubagentConfig } from './config.ts';
-import { PersistentPiRpcClient, type RpcEvent } from './rpc-client.ts';
-import { WorkerRegistry, type WorkerRecord, type WorkerStatus, type WorkerUsage } from './registry.ts';
+import { MAX_CONTEXT_BUDGET_TOKENS, MIN_CONTEXT_BUDGET_TOKENS, type CacheRetention, type PersistentSubagentConfig, type ReusePolicy } from './config.ts';
+import { PersistentPiRpcClient, type ContextUsage, type PromptDisposition, type RpcEvent } from './rpc-client.ts';
+import { WorkerRegistry, type WorkerOutcome, type WorkerRecord, type WorkerStatus, type WorkerUsage } from './registry.ts';
 import { resolveWorkerSelection, type ParentSelection, type WorkerSelectionInput } from './selection.ts';
 
 export type SendMode = 'auto' | 'steer' | 'follow_up' | 'interrupt';
@@ -14,9 +14,20 @@ export interface PiLaunchSpec {
   provider?: string;
   model?: string;
   thinking?: string;
+  extensions: string[];
   cwd: string;
   env: NodeJS.ProcessEnv;
 }
+
+/** Environment a worker process can read to learn who it is. Inherited values never leak to nested workers. */
+export const WORKER_ENV = {
+  depth: 'PI_PERSISTENT_SUBAGENT_DEPTH',
+  id: 'PI_PERSISTENT_SUBAGENT_ID',
+  name: 'PI_PERSISTENT_SUBAGENT_NAME',
+  role: 'PI_PERSISTENT_SUBAGENT_ROLE',
+  reuse: 'PI_PERSISTENT_SUBAGENT_REUSE',
+} as const;
+const PI_CACHE_RETENTION = 'PI_CACHE_RETENTION';
 
 export interface PiInvocation {
   command: string;
@@ -42,6 +53,24 @@ export interface WorkerPoolOptions {
 export interface SpawnAgentInput extends WorkerSelectionInput {
   task: string;
   name?: string;
+  contextBudgetTokens?: number;
+  reuse?: ReusePolicy;
+  cacheRetention?: CacheRetention;
+}
+
+/** Compaction the pool ran because an idle worker exceeded its context budget before new input. */
+export interface BudgetCompaction {
+  tokensBefore: number;
+  budget: number;
+  tokensAfter?: number;
+  cost?: number;
+  error?: string;
+}
+
+export interface SendInputResult {
+  snapshot: WorkerSnapshot;
+  disposition: PromptDisposition;
+  compaction?: BudgetCompaction;
 }
 
 export interface WorkerSnapshot extends WorkerRecord {
@@ -57,6 +86,8 @@ export interface WaitResult {
 
 interface ManagedWorker {
   lastActivityAt?: number;
+  /** Set while an interrupt aborts the current run; that run's settle is superseded, not a result. */
+  interrupting: boolean;
   record: WorkerRecord;
   client: PersistentPiRpcClient;
   commandChain: Promise<void>;
@@ -169,8 +200,18 @@ export class WorkerPool {
     if (!task) throw new Error('Agent task must be non-empty');
 
     const role = input.role ? this.config.roles[input.role] : undefined;
-    if (input.role && !role) throw new Error(`Unknown persistent subagent role "${input.role}"`);
+    if (input.role && !role) {
+      const known = Object.keys(this.config.roles);
+      throw new Error(`Unknown persistent subagent role "${input.role}". ${known.length ? `Configured roles: ${known.join(', ')}.` : 'No roles are configured; omit role or add roles to persistent-subagents config.'}`);
+    }
     const selection = resolveWorkerSelection(input, this.parent, this.config, role);
+    const contextBudgetTokens = input.contextBudgetTokens ?? role?.contextBudgetTokens ?? this.config.contextBudgetTokens;
+    if (contextBudgetTokens !== undefined && (!Number.isSafeInteger(contextBudgetTokens) || contextBudgetTokens < MIN_CONTEXT_BUDGET_TOKENS || contextBudgetTokens > MAX_CONTEXT_BUDGET_TOKENS)) {
+      throw new Error(`context budget must be an integer between ${MIN_CONTEXT_BUDGET_TOKENS} and ${MAX_CONTEXT_BUDGET_TOKENS} tokens`);
+    }
+    const reuse = input.reuse ?? role?.reuse ?? this.config.reuse;
+    const cacheRetention = input.cacheRetention ?? role?.cacheRetention ?? this.config.cacheRetention;
+    const extensions = [...new Set([...this.config.workerExtensions, ...(role?.extensions ?? [])])];
     const id = randomBytes(4).toString('hex');
     const sessionFile = join(this.sessionDir, `${id}.jsonl`);
     const now = Date.now();
@@ -192,6 +233,10 @@ export class WorkerPool {
       usage: zeroUsage(),
       cacheContinuity: 'warm_process',
       depth: this.currentDepth + 1,
+      ...(contextBudgetTokens !== undefined ? { contextBudgetTokens } : {}),
+      ...(reuse ? { reuse } : {}),
+      ...(cacheRetention ? { cacheRetention } : {}),
+      ...(extensions.length ? { extensions } : {}),
     };
 
     const worker = await this.launch(record);
@@ -199,8 +244,11 @@ export class WorkerPool {
       worker.record.status = 'running';
       worker.record.updatedAt = Date.now();
       await this.registry.upsert(worker.record);
-      await worker.client.prompt(task);
+      const disposition = await worker.client.prompt(task);
+      // A handled task (an extension command) starts no run, so no settle will ever mark it idle.
+      if (disposition === 'handled' && worker.record.status === 'running') this.markIdleWithoutResult(worker);
       this.emitUpdate(worker);
+      this.emitStateChange();
       return this.snapshot(worker);
     } catch (error) {
       worker.error = error instanceof Error ? error.message : String(error);
@@ -216,38 +264,85 @@ export class WorkerPool {
     }
   }
 
-  async sendInput(id: string, message: string, mode: SendMode = 'auto'): Promise<WorkerSnapshot> {
+  async sendInput(id: string, message: string, mode: SendMode = 'auto'): Promise<SendInputResult> {
     this.ensureInitialized();
     const worker = this.requireLive(id);
     const text = message.trim();
     if (!text) throw new Error('Agent input must be non-empty');
     if (!['auto', 'steer', 'follow_up', 'interrupt'].includes(mode)) throw new Error(`Unknown send mode ${mode}`);
     this.clearIdleTimer(worker);
+    // Mark busy before any await, so a parallel wait_agent cannot return the previous turn as this input's result.
+    const wasIdle = worker.record.status === 'idle';
+    if (wasIdle) this.setStatus(worker, 'running');
 
-    await this.enqueue(worker, async () => {
-      const state = await worker.client.getState();
-      const running = Boolean(state.isStreaming);
+    let disposition!: PromptDisposition;
+    let compaction: BudgetCompaction | undefined;
+    try {
+      await this.enqueue(worker, async () => {
+        if (mode === 'interrupt') {
+          worker.interrupting = true;
+          try { await worker.client.abort(); } finally { worker.interrupting = false; }
+        }
+        // The budget is checked where Pi itself checks compaction before a new prompt: only on an idle session
+        // (idle when queued, idle by now because the run settled meanwhile, or idle after the interrupt's abort).
+        if (wasIdle || mode === 'interrupt' || worker.record.status === 'idle') compaction = await this.enforceContextBudget(worker);
+        disposition = await worker.client.prompt(text, mode === 'follow_up' ? 'followUp' : 'steer');
+      });
+    } catch (error) {
+      if (wasIdle && worker.record.status === 'running' && worker.client.isAlive()) this.setStatus(worker, 'idle');
+      throw error;
+    }
 
-      if (mode === 'interrupt') {
-        if (running) await worker.client.abort();
-        await worker.client.prompt(text);
-      } else if (mode === 'follow_up') {
-        if (running) await worker.client.followUp(text);
-        else await worker.client.prompt(text);
-      } else if (mode === 'steer' || mode === 'auto') {
-        if (running) await worker.client.steer(text);
-        else await worker.client.prompt(text);
-      }
-
-      worker.record.status = 'running';
+    if (disposition === 'handled') {
+      if (wasIdle && worker.record.status === 'running') this.markIdleWithoutResult(worker);
+    } else {
       worker.record.taskPreview = preview(text);
-      worker.record.updatedAt = Date.now();
-      worker.record.lastUsedAt = worker.record.updatedAt;
-      await this.registry.upsert(worker.record);
-      this.emitUpdate(worker);
-    });
+      worker.record.lastUsedAt = Date.now();
+    }
+    worker.record.updatedAt = Date.now();
+    await this.registry.upsert(worker.record);
+    this.emitUpdate(worker);
+    return { snapshot: this.snapshot(worker), disposition, ...(compaction ? { compaction } : {}) };
+  }
 
-    return this.snapshot(worker);
+  /** Live context diagnostics; undefined for workers without a process. */
+  async contextUsage(id: string): Promise<ContextUsage | undefined> {
+    const worker = this.active.get(id);
+    if (!worker?.client.isAlive()) return undefined;
+    return (await worker.client.getSessionStats()).contextUsage;
+  }
+
+  private async enforceContextBudget(worker: ManagedWorker): Promise<BudgetCompaction | undefined> {
+    const budget = worker.record.contextBudgetTokens;
+    if (budget === undefined) return undefined;
+    const usage = (await worker.client.getSessionStats()).contextUsage;
+    // Unknown usage (fresh compaction) or a native window within budget leave Pi's own policy in charge.
+    if (!usage || usage.tokens === null || usage.contextWindow <= budget || usage.tokens <= budget) return undefined;
+    try {
+      const result = await worker.client.compact(this.config.compactionTimeoutMs);
+      return {
+        tokensBefore: usage.tokens,
+        budget,
+        ...(result.estimatedTokensAfter !== undefined ? { tokensAfter: result.estimatedTokensAfter } : {}),
+        ...(result.cost !== undefined ? { cost: result.cost } : {}),
+      };
+    } catch (error) {
+      // The input is still delivered: an over-budget turn is better than a lost instruction.
+      return { tokensBefore: usage.tokens, budget, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  private setStatus(worker: ManagedWorker, status: WorkerStatus): void {
+    worker.record.status = status;
+    worker.record.updatedAt = Date.now();
+    void this.registry.upsert(worker.record).catch(() => undefined);
+    this.emitUpdate(worker);
+    this.emitStateChange();
+  }
+
+  private markIdleWithoutResult(worker: ManagedWorker): void {
+    this.setStatus(worker, 'idle');
+    this.scheduleIdleClose(worker);
   }
 
   async waitForAgents(options: {
@@ -399,16 +494,13 @@ export class WorkerPool {
 
   private async launch(record: WorkerRecord): Promise<ManagedWorker> {
     if (this.shuttingDown) throw new Error('Worker pool is shutting down');
-    const env: NodeJS.ProcessEnv = {
-      ...this.env,
-      ...this.workerEnv?.(record),
-      PI_PERSISTENT_SUBAGENT_DEPTH: String(this.currentDepth + 1),
-    };
+    const env = workerProcessEnv(this.env, record, this.currentDepth + 1, this.workerEnv?.(record));
     const invocation = this.invocationFactory({
       sessionFile: record.sessionFile,
       provider: record.provider,
       model: record.model,
       thinking: record.thinking,
+      extensions: record.extensions ?? [],
       cwd: record.cwd,
       env,
     });
@@ -426,6 +518,7 @@ export class WorkerPool {
       client,
       commandChain: Promise.resolve(),
       intentionallyClosing: false,
+      interrupting: false,
     };
     this.active.set(record.id, worker);
 
@@ -463,6 +556,7 @@ export class WorkerPool {
     worker.metrics?.event(event);
     if (event.type === 'agent_start') {
       worker.record.completionId = undefined;
+      worker.record.outcome = undefined;
       worker.error = undefined;
       worker.record.lastOutput = null;
       worker.record.status = 'running';
@@ -476,9 +570,12 @@ export class WorkerPool {
     if (event.type === 'message_end') {
       const message = event.message as any;
       if (message?.role === 'assistant') {
+        // The latest assistant message decides: a retry that succeeds clears an earlier attempt's error.
         if (message.stopReason === 'error') {
           worker.error = typeof message.errorMessage === 'string' ? message.errorMessage : 'Provider request failed';
           worker.record.lastOutput = null;
+        } else if (message.stopReason !== 'aborted') {
+          worker.error = undefined;
         }
         const text = Array.isArray(message.content)
           ? message.content.filter((part: any) => part?.type === 'text' && typeof part.text === 'string').map((part: any) => part.text).join('\n')
@@ -494,7 +591,9 @@ export class WorkerPool {
     }
 
     if (event.type === 'agent_settled') {
-      if (worker.intentionallyClosing || worker.record.status !== 'running') return;
+      if (worker.intentionallyClosing || worker.interrupting || worker.record.status !== 'running') return;
+      const outcome: WorkerOutcome = event.aborted === true ? 'aborted' : worker.error ? 'error' : 'completed';
+      worker.record.outcome = outcome;
       worker.record.completionId = randomUUID();
       worker.record.status = 'idle';
       worker.record.cacheContinuity = 'warm_process';
@@ -579,7 +678,21 @@ export class WorkerPool {
   }
 }
 
-function parentScope(sessionId: string): string {
+function workerProcessEnv(base: NodeJS.ProcessEnv, record: WorkerRecord, depth: number, extra?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...base, ...extra };
+  for (const key of Object.values(WORKER_ENV)) delete env[key];
+  env[WORKER_ENV.depth] = String(depth);
+  env[WORKER_ENV.id] = record.id;
+  if (record.name) env[WORKER_ENV.name] = record.name;
+  if (record.role) env[WORKER_ENV.role] = record.role;
+  if (record.reuse) env[WORKER_ENV.reuse] = record.reuse;
+  // undefined keeps the inherited environment; an explicit choice always wins over it.
+  if (record.cacheRetention === 'long') env[PI_CACHE_RETENTION] = 'long';
+  else if (record.cacheRetention === 'default') delete env[PI_CACHE_RETENTION];
+  return env;
+}
+
+export function parentScope(sessionId: string): string {
   const hash = createHash('sha256').update(sessionId).digest('hex').slice(0, 16);
   return `parent-${hash}`;
 }

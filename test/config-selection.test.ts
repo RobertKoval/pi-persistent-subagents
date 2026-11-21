@@ -77,14 +77,23 @@ describe('resolveWorkerSelection', () => {
     cwd: '/repo',
   };
 
-  it('inherits provider/thinking/cwd but not the parent model by default', () => {
-    const result = resolveWorkerSelection({}, parent, DEFAULT_CONFIG, undefined);
+  it('inherits provider/thinking/cwd and pairs the provider with its configured default model', () => {
+    const result = resolveWorkerSelection({}, { ...parent, defaults: { provider: 'work-account', model: 'default-cheap' } }, DEFAULT_CONFIG, undefined);
     assert.deepEqual(result, {
       provider: 'work-account',
-      model: undefined,
+      model: 'default-cheap',
       thinking: 'high',
       cwd: '/repo',
     });
+  });
+
+  it('never yields a provider without a model, which Pi 1.x refuses to start', () => {
+    // Defaults for another provider do not apply; the parent's own model is a known-valid pair.
+    const inherited = resolveWorkerSelection({}, { ...parent, defaults: { provider: 'other', model: 'x' } }, DEFAULT_CONFIG, undefined);
+    assert.equal(inherited.model, 'manager-strong');
+    assert.throws(() => resolveWorkerSelection({ provider: 'unrelated' }, parent, DEFAULT_CONFIG, undefined), /provider "unrelated" has no model/);
+    const noProvider = resolveWorkerSelection({}, parent, { ...DEFAULT_CONFIG, inheritParentProvider: false }, undefined);
+    assert.deepEqual([noProvider.provider, noProvider.model], [undefined, undefined], 'with no provider Pi uses its own defaults');
   });
 
   it('lets a role choose a cheaper worker while retaining the parent provider', () => {

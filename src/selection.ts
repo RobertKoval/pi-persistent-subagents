@@ -14,6 +14,8 @@ export interface ParentSelection {
   model?: string;
   thinking?: string;
   cwd: string;
+  /** Pi's configured startup selection (settings defaultProvider/defaultModel). */
+  defaults?: {provider?: string; model?: string};
 }
 
 export interface ResolvedWorkerSelection {
@@ -41,7 +43,12 @@ export function resolveWorkerSelection(
 
   const model = explicitModel.model
     ?? roleModel.model
-    ?? (config.inheritParentModel ? clean(parent.model) : undefined);
+    ?? (config.inheritParentModel ? clean(parent.model) : undefined)
+    ?? (provider ? providerDefaultModel(provider, parent) : undefined);
+  // Pi 1.x rejects --provider without --model, so an unresolved pair must fail here, with a remedy.
+  if (provider && !model) {
+    throw new Error(`Worker provider "${provider}" has no model: Pi requires one. Pass model, configure a role with a model, or set inheritParentModel.`);
+  }
 
   const thinking = clean(input.thinking)
     ?? clean(role?.thinking)
@@ -53,6 +60,13 @@ export function resolveWorkerSelection(
     thinking,
     cwd: clean(input.cwd) ?? parent.cwd,
   };
+}
+
+/** The model Pi would start with for this provider: the configured default, else the parent's own model. */
+function providerDefaultModel(provider: string, parent: ParentSelection): string | undefined {
+  if (clean(parent.defaults?.provider) === provider && clean(parent.defaults?.model)) return clean(parent.defaults?.model);
+  if (clean(parent.provider) === provider) return clean(parent.model);
+  return undefined;
 }
 
 function parseModelRef(

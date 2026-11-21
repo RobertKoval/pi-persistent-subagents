@@ -68,22 +68,40 @@ describe('PersistentPiRpcClient', () => {
     assert.equal(await client.getLastAssistantText(), `ECHO:${message}`);
   });
 
-  it('routes explicit steer and follow_up RPC commands', async () => {
+  it('submits queued input as prompt with streamingBehavior and returns Pi\'s disposition', async () => {
     const { client, log } = await makeClient();
     await client.start();
-    await client.prompt('__SLOW__');
-    await client.steer('redirect');
+    assert.equal(await client.prompt('__SLOW__'), 'started');
+    assert.equal(await client.prompt('redirect', 'steer'), 'queued');
     await client.waitForIdle(2_000);
     assert.equal(await client.getLastAssistantText(), 'STEER:redirect');
-
-    await client.prompt('__SLOW__');
-    await client.followUp('after');
-    await client.waitForIdle(2_000);
-    await client.waitForIdle(2_000);
-
+    assert.equal(await client.prompt('/handled-command'), 'handled');
     const seen = await commands(log);
-    assert.ok(seen.some((x) => x.type === 'steer' && x.message === 'redirect'));
-    assert.ok(seen.some((x) => x.type === 'follow_up' && x.message === 'after'));
+    assert.ok(seen.some((x) => x.type === 'prompt' && x.message === 'redirect' && x.streamingBehavior === 'steer'));
+  });
+
+  it('fails loudly when a prompt response carries no disposition (pre-1.x Pi)', async () => {
+    const client = new PersistentPiRpcClient({ command: process.execPath, args: ['-e', `
+      process.stdin.on('data', b => { for (const l of String(b).split('\\n').filter(Boolean)) { const c = JSON.parse(l);
+        process.stdout.write(JSON.stringify({ type: 'response', id: c.id, command: c.type, success: true, data: c.type === 'get_state' ? { isStreaming: false } : {} }) + '\\n'); } });
+    `], shutdownGraceMs: 100 });
+    clients.push(client);
+    await client.start();
+    await assert.rejects(() => client.prompt('hello'), /no valid disposition.*Pi >= 1\.6/);
+  });
+
+  it('closes stdin before signalling so Pi can run its orderly shutdown', async () => {
+    const client = new PersistentPiRpcClient({ command: process.execPath, args: ['-e', `
+      process.on('SIGTERM', () => {});
+      process.stdin.on('data', b => { for (const l of String(b).split('\\n').filter(Boolean)) { const c = JSON.parse(l);
+        process.stdout.write(JSON.stringify({ type: 'response', id: c.id, command: c.type, success: true, data: { isStreaming: false } }) + '\\n'); } });
+      process.stdin.on('end', () => setTimeout(() => process.exit(0), 50));
+    `], shutdownGraceMs: 5_000 });
+    clients.push(client);
+    await client.start();
+    const started = Date.now();
+    await client.stop();
+    assert.ok(Date.now() - started < 2_000, 'a child that exits on stdin EOF must not wait for the SIGKILL grace');
   });
 
   it('rejects unknown RPC commands with the provider error', async () => {

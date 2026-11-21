@@ -80,22 +80,103 @@ describe('WorkerPool persistent actor lifecycle', () => {
     assert.ok(snapshot.usage.cacheRead > 0);
   });
 
-  it('auto sends steer instead of an illegal prompt while the worker is running', async () => {
+  it('auto steers a running worker with one atomic prompt instead of a state check', async () => {
     const { pool, log } = await makePool();
     const worker = await pool.spawnAgent({ task: '__SLOW__' });
-    await pool.sendInput(worker.id, 'redirect', 'auto');
+    const sent = await pool.sendInput(worker.id, 'redirect', 'auto');
+    assert.equal(sent.disposition, 'queued');
     await pool.waitForAgents({ ids: [worker.id], until: 'all', timeoutMs: 2_000 });
     const commands = (await commandLog(log)).map((entry) => entry.command);
-    assert.ok(commands.some((c) => c.type === 'steer' && c.message === 'redirect'));
+    assert.ok(commands.some((c) => c.type === 'prompt' && c.message === 'redirect' && c.streamingBehavior === 'steer'));
+    assert.ok(!commands.some((c) => c.type === 'get_state' && commands.indexOf(c) > 1), 'send_input must not read state before acting');
     assert.equal(pool.getAgent(worker.id)?.lastOutput, 'STEER:redirect');
   });
 
-  it('queues follow_up while running', async () => {
+  it('queues follow_up into the running turn and settles once after it', async () => {
     const { pool, log } = await makePool();
     const worker = await pool.spawnAgent({ task: '__SLOW__' });
-    await pool.sendInput(worker.id, 'after-current', 'follow_up');
+    let settled = 0;
+    pool.onSettled(() => { settled++; });
+    const sent = await pool.sendInput(worker.id, 'after-current', 'follow_up');
+    assert.equal(sent.disposition, 'queued');
+    await pool.waitForAgents({ ids: [worker.id], until: 'all', timeoutMs: 2_000 });
     const commands = (await commandLog(log)).map((entry) => entry.command);
-    assert.ok(commands.some((c) => c.type === 'follow_up' && c.message === 'after-current'));
+    assert.ok(commands.some((c) => c.type === 'prompt' && c.message === 'after-current' && c.streamingBehavior === 'followUp'));
+    assert.equal(pool.getAgent(worker.id)?.lastOutput, 'FOLLOW:after-current');
+    assert.equal(settled, 1);
+  });
+
+  it('starts a run when input reaches an idle worker and reports the disposition', async () => {
+    const { pool } = await makePool();
+    const worker = await pool.spawnAgent({ task: 'first' });
+    await pool.waitForAgents({ ids: [worker.id], until: 'all', timeoutMs: 2_000 });
+    const sent = await pool.sendInput(worker.id, 'second', 'follow_up');
+    assert.equal(sent.disposition, 'started');
+    assert.equal(sent.snapshot.status, 'running');
+    await pool.waitForAgents({ ids: [worker.id], until: 'all', timeoutMs: 2_000 });
+    assert.equal(pool.getAgent(worker.id)?.lastOutput, 'ECHO:second');
+  });
+
+  it('marks input busy before any await so a parallel wait cannot return the previous result', async () => {
+    const { pool } = await makePool();
+    const worker = await pool.spawnAgent({ task: 'first' });
+    await pool.waitForAgents({ ids: [worker.id], until: 'all', timeoutMs: 2_000 });
+    const previous = pool.getAgent(worker.id)!.completionId;
+    const sending = pool.sendInput(worker.id, 'second', 'auto');
+    const waited = await pool.waitForAgents({ ids: [worker.id], until: 'all', timeoutMs: 2_000 });
+    await sending;
+    assert.equal(waited.timedOut, false);
+    assert.notEqual(waited.statuses[worker.id].completionId, previous);
+    assert.equal(waited.statuses[worker.id].lastOutput, 'ECHO:second');
+  });
+
+  it('returns an idle worker to idle when its input is handled without a run', async () => {
+    const { pool } = await makePool();
+    const worker = await pool.spawnAgent({ task: 'first' });
+    await pool.waitForAgents({ ids: [worker.id], until: 'all', timeoutMs: 2_000 });
+    const previous = pool.getAgent(worker.id)!.completionId;
+    const sent = await pool.sendInput(worker.id, '/some-extension-command', 'auto');
+    assert.equal(sent.disposition, 'handled');
+    assert.equal(sent.snapshot.status, 'idle');
+    assert.equal(pool.getAgent(worker.id)!.completionId, previous, 'no new result exists for handled input');
+  });
+
+  it('settles a spawned worker whose task is handled without a run', async () => {
+    const { pool } = await makePool();
+    const worker = await pool.spawnAgent({ task: '/accounts' });
+    assert.equal(worker.status, 'idle');
+    const waited = await pool.waitForAgents({ ids: [worker.id], until: 'all', timeoutMs: 200 });
+    assert.equal(waited.timedOut, false);
+  });
+
+  it('interrupt reports only the replacement run, never the aborted one', async () => {
+    const { pool } = await makePool();
+    const worker = await pool.spawnAgent({ task: '__SLOW__' });
+    const settled: string[] = [];
+    pool.onSettled((s) => settled.push(`${s.outcome}:${s.lastOutput}`));
+    await pool.sendInput(worker.id, 'replacement', 'interrupt');
+    await pool.waitForAgents({ ids: [worker.id], until: 'all', timeoutMs: 2_000 });
+    assert.deepEqual(settled, ['completed:ECHO:replacement']);
+  });
+
+  it('reports an abort it did not request as an aborted outcome', async () => {
+    const { pool } = await makePool();
+    const worker = await pool.spawnAgent({ task: '__SLOW__' });
+    const live = (pool as any).active.get(worker.id);
+    await live.client.abort();
+    await pool.waitForAgents({ ids: [worker.id], until: 'all', timeoutMs: 2_000 });
+    assert.equal(pool.getAgent(worker.id)?.outcome, 'aborted');
+    assert.equal(pool.getAgent(worker.id)?.status, 'idle');
+  });
+
+  it('clears an earlier attempt error when Pi retries successfully within the run', async () => {
+    const { pool } = await makePool();
+    const worker = await pool.spawnAgent({ task: '__RETRY_THEN_OK__' });
+    await pool.waitForAgents({ ids: [worker.id], until: 'all', timeoutMs: 2_000 });
+    const snapshot = pool.getAgent(worker.id)!;
+    assert.equal(snapshot.outcome, 'completed');
+    assert.equal(snapshot.error, undefined);
+    assert.equal(snapshot.lastOutput, 'ECHO:recovered');
   });
 
   it('interrupt aborts current work before sending a fresh prompt', async () => {

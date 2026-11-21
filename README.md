@@ -11,7 +11,7 @@ Delegate a task, let the worker settle, then continue in the **same live process
 
 [![CI](https://github.com/RobertKoval/pi-persistent-subagents/actions/workflows/ci.yml/badge.svg)](https://github.com/RobertKoval/pi-persistent-subagents/actions/workflows/ci.yml)
 [![MIT](https://img.shields.io/badge/license-MIT-22c7a9)](LICENSE)
-[![Pi 0.85.x](https://img.shields.io/badge/Pi-0.85.x-7c8aff)](https://github.com/earendil-works/pi)
+[![Pi ^1.6](https://img.shields.io/badge/Pi-%5E1.6-7c8aff)](https://github.com/earendil-works/pi)
 [![Node ≥22.19](https://img.shields.io/badge/Node-%E2%89%A522.19-8bc34a)](package.json)
 
 [Quick start](#quick-start) · [Tools](#six-tools-one-workflow) · [Configuration](docs/configuration.md) · [How it works](docs/architecture.md)
@@ -24,7 +24,7 @@ A worker owns an ongoing workstream: a code area, an investigation, or a review.
 
 - **Continue without restarting.** Reuse a worker with `send_input`.
 - **Steer work in flight.** Redirect, queue a follow-up, or interrupt.
-- **See what is happening.** Get compact TOON status; request full results and token/cache diagnostics when needed.
+- **See what is happening.** Get compact TOON status; request full results and token/cache diagnostics when needed. The footer shows main + worker cost.
 - **Resume deliberately.** Close a worker and reopen its saved conversation later.
 - **Keep ownership clear.** Workers exit when the parent shuts down; sessions remain resumable.
 
@@ -32,7 +32,7 @@ Persistent processes preserve cache *eligibility*. They do not guarantee cache h
 
 ## Quick start
 
-Requires **Pi 0.85.x** and **Node.js 22.19+**. Authenticate your provider in Pi first.
+Requires **Pi 1.6+** and **Node.js 22.19+**. Authenticate your provider in Pi first. Upgrading from 0.3.x? See the [changelog](CHANGELOG.md).
 
 ```sh
 pi install git:https://github.com/RobertKoval/pi-persistent-subagents
@@ -57,10 +57,10 @@ pi -e .
 
 | Tool | What it does |
 | --- | --- |
-| `spawn_agent` | Start a persistent worker with a task and optional role/model. |
+| `spawn_agent` | Start a persistent worker with a task, optional role/model, reuse hint and context budget. |
 | `send_input` | Continue an idle worker, steer a running one, queue work, or interrupt. |
 | `wait_agent` | Wait for any/all selected workers. A timeout leaves them alive. |
-| `list_agents` | Inspect worker states in a compact list; fetch results and diagnostics when needed. |
+| `list_agents` | Inspect worker states and configured roles; fetch results, diagnostics and context usage when needed. |
 | `close_agent` | Stop the process and retain its conversation. |
 | `resume_agent` | Start a new process on the saved conversation. |
 
@@ -82,8 +82,8 @@ Save this as `.pi/persistent-subagents.json` in your project. Use model IDs avai
 {
   "maxAgents": 3,
   "roles": {
-    "coder": { "model": "gpt-5.6-luna", "thinking": "low" },
-    "reviewer": { "model": "gpt-5.6-terra", "thinking": "medium" }
+    "coder": { "model": "gpt-5.6-luna", "thinking": "low", "description": "Implements a scoped change" },
+    "reviewer": { "model": "gpt-5.6-terra", "thinking": "medium", "contextBudgetTokens": 250000, "description": "Reviews a diff" }
   }
 }
 ```
@@ -113,6 +113,6 @@ npm run typecheck
 npm run test:e2e
 ```
 
-Default tests use fake RPC processes and make **no model calls**. The opt-in Pi smoke also makes no model call. Live tests exercise real providers and consume quota; see [testing](docs/testing.md).
+Default tests use fake RPC processes and make **no model calls**. `test:e2e` drives the installed Pi against a local mock model, so it makes no paid call either. Live tests exercise real providers and consume quota; see [testing](docs/testing.md).
 
 Bug reports and focused contributions are welcome. [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [MIT license](LICENSE)

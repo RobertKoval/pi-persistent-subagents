@@ -1,9 +1,13 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, basename, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { CACHE_RETENTIONS, REUSE_POLICIES, type CacheRetention, type ReusePolicy } from './config.ts';
 
 export type WorkerStatus = 'starting' | 'running' | 'idle' | 'closed' | 'crashed';
 export type CacheContinuity = 'warm_process' | 'cold_process';
+/** How the latest settled run ended: a normal finish, a provider error after Pi's retries, or an abort. */
+export const WORKER_OUTCOMES = ['completed', 'error', 'aborted'] as const;
+export type WorkerOutcome = (typeof WORKER_OUTCOMES)[number];
 
 export interface WorkerUsage {
   input: number;
@@ -29,9 +33,15 @@ export interface WorkerRecord {
   taskPreview: string;
   lastOutput: string | null;
   completionId?: string;
+  outcome?: WorkerOutcome;
   usage: WorkerUsage;
   cacheContinuity: CacheContinuity;
   depth: number;
+  contextBudgetTokens?: number;
+  reuse?: ReusePolicy;
+  cacheRetention?: CacheRetention;
+  /** Extensions the worker was launched with; resume relaunches with the same set. */
+  extensions?: string[];
 }
 
 interface RegistryFile {
@@ -153,6 +163,7 @@ function sanitizeRecord(raw: WorkerRecord): WorkerRecord {
     updatedAt: finiteNumber(raw.updatedAt, 'updatedAt'),
     lastUsedAt: finiteNumber(raw.lastUsedAt, 'lastUsedAt'),
     ...(optionalString(raw.completionId) ? { completionId: optionalString(raw.completionId) } : {}),
+    ...(raw.outcome !== undefined ? { outcome: member(raw.outcome, WORKER_OUTCOMES, 'outcome') } : {}),
     taskPreview: typeof raw.taskPreview === 'string' ? raw.taskPreview : '',
     lastOutput: raw.lastOutput === null ? null : (typeof raw.lastOutput === 'string' ? raw.lastOutput : null),
     usage: {
@@ -164,11 +175,24 @@ function sanitizeRecord(raw: WorkerRecord): WorkerRecord {
     },
     cacheContinuity,
     depth: nonNegative(raw.depth, 'depth'),
+    ...(raw.contextBudgetTokens !== undefined ? { contextBudgetTokens: nonNegative(raw.contextBudgetTokens, 'contextBudgetTokens') } : {}),
+    ...(raw.reuse !== undefined ? { reuse: member(raw.reuse, REUSE_POLICIES, 'reuse') } : {}),
+    ...(raw.cacheRetention !== undefined ? { cacheRetention: member(raw.cacheRetention, CACHE_RETENTIONS, 'cacheRetention') } : {}),
+    ...(raw.extensions !== undefined ? { extensions: stringArray(raw.extensions, 'extensions') } : {}),
   };
 }
 
+function member<T extends string>(value: unknown, allowed: readonly T[], name: string): T {
+  if (typeof value !== 'string' || !allowed.includes(value as T)) throw new Error(`Worker registry field ${name} is invalid`);
+  return value as T;
+}
+function stringArray(value: unknown, name: string): string[] {
+  if (!Array.isArray(value) || !value.every(v => typeof v === 'string' && v.trim())) throw new Error(`Worker registry field ${name} must be a string array`);
+  return [...value];
+}
+
 function cloneRecord(record: WorkerRecord): WorkerRecord {
-  return { ...record, usage: { ...record.usage } };
+  return { ...record, usage: { ...record.usage }, ...(record.extensions ? { extensions: [...record.extensions] } : {}) };
 }
 
 function requiredString(value: unknown, name: string): string {

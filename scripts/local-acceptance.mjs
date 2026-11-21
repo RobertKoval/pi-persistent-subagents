@@ -165,8 +165,8 @@ try {
    state=(await probe('list_agents')).details[0];
    assert.match(state.lastOutput,/INTERRUPT-739/);assert.equal(state.pid,w.pid);assert.equal(state.error,undefined);
    const log=await probe('rpc-log');
-   assert.ok(log.some(e=>e.command==='steer'&&e.phase==='accepted'));
-   assert.ok(log.some(e=>e.command==='follow_up'&&e.phase==='accepted'));
+   assert.ok(log.some(e=>e.command==='prompt'&&e.behavior==='steer'&&e.phase==='accepted'));
+   assert.ok(log.some(e=>e.command==='prompt'&&e.behavior==='followUp'&&e.phase==='accepted'));
    const abort=log.findIndex(e=>e.command==='abort'&&e.phase==='accepted');
    assert.ok(abort>=0);assert.ok(log.slice(abort+1).some(e=>e.command==='prompt'&&e.phase==='send'));
    console.log(JSON.stringify({stage:'streaming',samePid:true,steer:true,followUp:true,abortBeforePrompt:true,usage:state.usage,rpc:log}));

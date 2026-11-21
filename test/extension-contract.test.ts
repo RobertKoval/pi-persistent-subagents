@@ -30,11 +30,12 @@ async function harness(depth = 0, settings: Record<string, unknown> = {}) {
   let entries: any[] = [];
   let active: string[] | undefined;
   let idle = true;
-  const ctx: any = { isIdle: () => idle, hasPendingMessages: () => false, cwd: root, model: { provider: 'openai-codex', id: 'fake' }, thinkingLevel: 'low',
-    sessionManager: { getSessionId: () => 'parent', getEntries: () => entries }, ui: { notify(message: string) { uiMessages.push(message); } } };
+  const statuses = new Map<string, string | undefined>();
+  const ctx: any = { isIdle: () => idle, hasPendingMessages: () => false, cwd: root, model: { provider: 'openai-codex', id: 'fake' }, thinkingLevel: 'low', hasUI: true,
+    sessionManager: { getSessionId: () => 'parent', getEntries: () => entries }, ui: { notify(message: string) { uiMessages.push(message); }, setStatus(key: string, text: string | undefined) { statuses.set(key, text); } } };
   extension({ registerTool: (t: any) => tools.set(t.name, t), registerCommand(name:string, command:any) { commands.set(name,command); },
     on: (name: string, fn: any) => events.set(name, fn), sendMessage(message: any, options: any) { notifications.push({message,options}); },
-    getActiveTools: () => active ?? [...tools.keys()], setActiveTools(names: string[]) { active = names; } } as any);
+    getActiveTools: () => active ?? [...tools.keys()], setActiveTools(names: string[]) { active = names; }, getSettings: () => ({}) } as any);
   cleanups.push(async () => {
     await events.get('session_shutdown')?.({}, ctx);
     if (oldDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = oldDir;
@@ -43,7 +44,7 @@ async function harness(depth = 0, settings: Record<string, unknown> = {}) {
     await rm(root, { recursive: true, force: true });
   });
   const call = (name: string, params: any, onUpdate?: (value: any) => void) => tools.get(name).execute('test', params, undefined, onUpdate, ctx);
-  return { root, setProvider:(provider:string)=>{ctx.model.provider=provider;}, uiMessages, workers:()=>commands.get('pworkers').handler('',ctx), command:(args:string)=>commands.get('pmetrics').handler(args,ctx), event: (event:any) => events.get(event.type)?.(event,ctx), setIdle(value: boolean) { idle=value; }, notifications, call, start: () => events.get('session_start')({},ctx), active: () => active ?? [...tools.keys()], shutdown: () => events.get('session_shutdown')({},ctx), select(account: string) { entries = [{ type: 'custom', customType: 'pi-accounts-selection', data: { version: 1, sessionId: 'parent', providers: { 'openai-codex': account } } }]; } };
+  return { root, statuses, setEntries:(value:any[])=>{entries=value;}, setProvider:(provider:string)=>{ctx.model.provider=provider;}, uiMessages, workers:()=>commands.get('pworkers').handler('',ctx), command:(args:string)=>commands.get('pmetrics').handler(args,ctx), event: (event:any) => events.get(event.type)?.(event,ctx), setIdle(value: boolean) { idle=value; }, notifications, call, start: () => events.get('session_start')({},ctx), active: () => active ?? [...tools.keys()], shutdown: () => events.get('session_shutdown')({},ctx), select(account: string) { entries = [{ type: 'custom', customType: 'pi-accounts-selection', data: { version: 1, sessionId: 'parent', providers: { 'openai-codex': account } } }]; } };
 }
 
 it('lists the same session path exposed by spawn after settling', async () => {
@@ -94,7 +95,7 @@ for (const task of ['PRIVATE_OUTPUT_'.repeat(1000), '__PROVIDER_ERROR__']) {
     const {message,options} = h.notifications[0];
     const result=(await h.call('wait_agent',{ids:[worker.id],timeout_ms:2000})).details.statuses[worker.id];
     assert.ok(result.completionId);
-    assert.equal(message.content, `Worker ${worker.id}: ${task === '__PROVIDER_ERROR__' ? 'error' : 'idle'} (result ${result.completionId}).\nUse wait_agent for unread results.`);
+    assert.equal(message.content, `Worker ${worker.id}: ${task === '__PROVIDER_ERROR__' ? 'error' : 'completed'} (result ${result.completionId}).\nUse wait_agent for unread results.`);
     assert.deepEqual(options,{triggerTurn:true});
     if(task==='__PROVIDER_ERROR__') assert.match(result.error,/usage limit/);
     else assert.equal(result.lastOutput,`ECHO:${task}`);
@@ -108,9 +109,9 @@ it('returns compact TOON acknowledgements and lists, with full results and diagn
   const w=spawned.details;
   await h.call('wait_agent',{ids:[w.id],timeout_ms:2000});
   const sent=await h.call('send_input',{id:w.id,message:task});
-  assert.deepEqual(decode(sent.content[0].text),{id:w.id,status:sent.details.status,pid:w.pid});
+  assert.deepEqual(decode(sent.content[0].text),{id:w.id,status:'running',pid:w.pid,disposition:'started'});
   const waited=await h.call('wait_agent',{ids:[w.id],timeout_ms:2000});
-  assert.deepEqual(decode(waited.content[0].text),{timed_out:false,agents:[{id:w.id,status:'idle',result_id:waited.details.statuses[w.id].completionId,error:null,output:`ECHO:${task}`}]});
+  assert.deepEqual(decode(waited.content[0].text),{timed_out:false,agents:[{id:w.id,status:'idle',outcome:'completed',result_id:waited.details.statuses[w.id].completionId,error:null,output:`ECHO:${task}`}]});
   const list=decode((await h.call('list_agents',{})).content[0].text) as any;
   assert.deepEqual(list,{agents:[{id:w.id,name:'reviewer, "one"\nsecond line',status:'idle',pid:w.pid,model:'openai-codex/worker-model',error:null}]});
   const verbose=decode((await h.call('list_agents',{verbose:true})).content[0].text) as any;
@@ -313,3 +314,44 @@ it('applies inherited identity only to OpenRouter requests while retaining worke
   assert.deepEqual(headers,{'x-title':'Worker','HTTP-Referer':'https://pi.dev'});
  } finally {if(old===undefined)delete process.env[key];else process.env[key]=old;}
 });
+
+it('lists configured roles with their descriptions so the model can choose one', async () => {
+  const h = await harness(0, { roles: { advisor: { model: 'strong', description: 'Second opinion on a plan' }, explorer: { provider: 'p', model: 'cheap' } } });
+  const listed = decode((await h.call('list_agents', {})).content[0].text) as any;
+  assert.deepEqual(listed.roles, [
+    { name: 'advisor', description: 'Second opinion on a plan', model: 'strong' },
+    { name: 'explorer', description: null, model: 'p/cheap' },
+  ]);
+  const plain = decode((await (await harness()).call('list_agents', {})).content[0].text) as any;
+  assert.equal(plain.roles, undefined);
+});
+
+it('shows main plus worker cost in the footer once the session has a worker', async () => {
+  const h = await harness();
+  h.setEntries([{ type: 'message', message: { role: 'assistant', usage: { cost: { total: 14 } } } }]);
+  await h.start();
+  await new Promise(r => setTimeout(r, 400));
+  assert.equal(h.statuses.get('persistent-subagents'), undefined, 'no worker, no extra footer text');
+  const w = (await h.call('spawn_agent', { task: 'hello' })).details;
+  await h.call('wait_agent', { ids: [w.id], timeout_ms: 2000 });
+  await eventually(() => h.statuses.get('persistent-subagents') !== undefined);
+  assert.match(h.statuses.get('persistent-subagents')!, /^Σ \$14\.00 · main \$14\.00 · workers \$0\.000$/);
+});
+
+for (const [depth, reuse, stops] of [[1, 'one_shot', true], [1, 'long_lived', false], [0, 'one_shot', false]] as const) {
+  it(`worker at depth ${depth} with reuse=${reuse} ${stops ? 'stops' : 'leaves'} Pi idle cache warming`, () => {
+    const saved = { depth: process.env.PI_PERSISTENT_SUBAGENT_DEPTH, reuse: process.env.PI_PERSISTENT_SUBAGENT_REUSE };
+    process.env.PI_PERSISTENT_SUBAGENT_DEPTH = String(depth);
+    process.env.PI_PERSISTENT_SUBAGENT_REUSE = reuse;
+    const handlers = new Map<string, any>();
+    try {
+      extension({ registerTool() {}, registerCommand() {}, on: (name: string, fn: any) => handlers.set(name, fn) } as any);
+    } finally {
+      for (const [key, value] of [['PI_PERSISTENT_SUBAGENT_DEPTH', saved.depth], ['PI_PERSISTENT_SUBAGENT_REUSE', saved.reuse]] as const) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+    }
+    const decision = handlers.get('cache_warming_decision')?.({ action: 'warm', warmCost: 0.01, missCost: 1, continuationProbability: 0.9 }, {});
+    assert.deepEqual(decision, stops ? { action: 'stop' } : undefined);
+  });
+}

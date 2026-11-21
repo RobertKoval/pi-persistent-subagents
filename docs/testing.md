@@ -9,16 +9,16 @@ npm run typecheck
 npm run diagnose
 ```
 
-The default suite spawns deterministic fake RPC processes. It covers PID reuse, routing, shutdown, crash recovery, session continuity, account selection, framing and errors without contacting a model.
+The default suite spawns deterministic fake RPC processes that follow Pi 1.6's protocol (dispositions, aborted settles, queued input within one run). It covers PID reuse, routing, shutdown, crash recovery, session continuity, account selection, framing and errors without contacting a model.
 
-## Installed Pi, no model calls
+## Installed Pi, no paid model calls
 
 ```sh
 npm run test:e2e
 npm run test:lifecycle
 ```
 
-The first command verifies extension registration and executes `/pworkers`. The second tests startup cleanup under SIGTERM, SIGHUP and SIGKILL. Lifecycle scripts currently use POSIX process inspection and are intended for macOS/Linux.
+`test:e2e` runs the installed Pi (the pinned dev dependency) in RPC mode with an isolated `PI_CODING_AGENT_DIR` whose only provider is `test/fakes/mock-openai-server.mjs`, a local OpenAI-compatible server with fixed prices. It verifies extension registration and `/pworkers`, then the real worker lifecycle: same PID across turns, a queued steer, an interrupt without a phantom result, a provider error outcome, close and resume on the same transcript, no process left after parent shutdown, session cost equal to Pi's `get_session_stats`, the footer total, and a context-budget compaction before new input. CI runs it on every push. `test:lifecycle` tests startup cleanup under SIGTERM, SIGHUP and SIGKILL. Lifecycle scripts currently use POSIX process inspection and are intended for macOS/Linux.
 
 ## Live acceptance
 
