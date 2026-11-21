@@ -16,7 +16,7 @@ export const MOCK_COST = { input: 10, output: 20, cacheRead: 1, cacheWrite: 12.5
  * The installed Pi runtime against a local OpenAI-compatible mock: real RPC, sessions, compaction and
  * cost accounting with no paid model call. Workers load this working tree through the isolated settings.
  */
-export async function startMockPi(options: { contextWindow?: number; project?: Record<string, unknown> } = {}) {
+export async function startMockPi(options: { contextWindow?: number; project?: Record<string, unknown>; trust?: '--approve' | '--no-approve' | 'none' } = {}) {
   const work = await mkdtemp(join(tmpdir(), 'pi-mock-work-'));
   const agentDir = await mkdtemp(join(tmpdir(), 'pi-mock-agent-'));
   const llmLog = join(work, 'llm.jsonl');
@@ -37,7 +37,7 @@ export async function startMockPi(options: { contextWindow?: number; project?: R
   const parent = new PersistentPiRpcClient({
     command: 'pi',
     // The parent loads the plugin through the probe only; workers get it from settings.extensions.
-    args: ['--no-extensions', '-e', probeExtension, '--mode', 'rpc', '--session', join(work, 'parent.jsonl')],
+    args: ['--no-extensions', '-e', probeExtension, ...(options.trust === 'none' ? [] : [options.trust ?? '--approve']), '--mode', 'rpc', '--session', join(work, 'parent.jsonl')],
     cwd: work, env, startupTimeoutMs: 30_000, commandTimeoutMs: 60_000, shutdownGraceMs: 10_000,
   });
   const events: RpcEvent[] = [];

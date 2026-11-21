@@ -18,7 +18,7 @@ async function dirs() {
 describe('loadConfig', () => {
   it('returns safe cache-friendly defaults with no files', async () => {
     const { cwd, agentDir } = await dirs();
-    const result = await loadConfig(cwd, agentDir);
+    const result = await loadConfig(cwd, agentDir, { projectTrusted: true });
     assert.deepEqual(result.config, DEFAULT_CONFIG);
     assert.deepEqual(result.warnings, []);
     assert.equal(result.config.idleTtlMs, 0);
@@ -40,7 +40,7 @@ describe('loadConfig', () => {
       roles: { coder: { model: 'cheaper' } }
     }));
 
-    const result = await loadConfig(cwd, agentDir);
+    const result = await loadConfig(cwd, agentDir, { projectTrusted: true });
     assert.equal(result.config.maxAgents, 5);
     assert.equal(result.config.notificationMaxChars, 2000);
     assert.deepEqual(result.config.roles.coder, { provider: 'work', model: 'cheaper', thinking: 'medium' });
@@ -52,17 +52,30 @@ describe('loadConfig', () => {
     await writeFile(join(agentDir, 'persistent-subagents', 'config.json'), JSON.stringify({ maxAgents: 4 }));
     await writeFile(join(cwd, '.pi', 'persistent-subagents.json'), JSON.stringify({ maxAgents: 0, maxDepth: 99 }));
 
-    const result = await loadConfig(cwd, agentDir);
+    const result = await loadConfig(cwd, agentDir, { projectTrusted: true });
     assert.equal(result.config.maxAgents, 4);
     assert.equal(result.config.maxDepth, DEFAULT_CONFIG.maxDepth);
     assert.equal(result.warnings.length, 1);
     assert.match(result.warnings[0], /project.*invalid|maxAgents/i);
   });
 
+  it('ignores project config in a project Pi does not trust, and says so', async () => {
+    const { cwd, agentDir } = await dirs();
+    await writeFile(join(agentDir, 'persistent-subagents', 'config.json'), JSON.stringify({ maxAgents: 4 }));
+    await writeFile(join(cwd, '.pi', 'persistent-subagents.json'), JSON.stringify({ maxAgents: 9, roles: { r: { model: 'x' } } }));
+    const untrusted = await loadConfig(cwd, agentDir, { projectTrusted: false });
+    assert.equal(untrusted.config.maxAgents, 4);
+    assert.deepEqual(untrusted.config.roles, {});
+    assert.match(untrusted.warnings.join('\n'), /ignored because Pi does not trust this project/);
+    const trusted = await loadConfig(cwd, agentDir, { projectTrusted: true });
+    assert.equal(trusted.config.maxAgents, 9);
+    assert.deepEqual(trusted.warnings, []);
+  });
+
   it('rejects unknown top-level fields instead of silently accepting typos', async () => {
     const { cwd, agentDir } = await dirs();
     await writeFile(join(cwd, '.pi', 'persistent-subagents.json'), JSON.stringify({ maxAgnts: 7 }));
-    const result = await loadConfig(cwd, agentDir);
+    const result = await loadConfig(cwd, agentDir, { projectTrusted: true });
     assert.equal(result.config.maxAgents, DEFAULT_CONFIG.maxAgents);
     assert.equal(result.warnings.length, 1);
     assert.match(result.warnings[0], /unknown.*maxAgnts/i);

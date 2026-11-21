@@ -31,7 +31,7 @@ async function harness(depth = 0, settings: Record<string, unknown> = {}) {
   let active: string[] | undefined;
   let idle = true;
   const statuses = new Map<string, string | undefined>();
-  const ctx: any = { isIdle: () => idle, hasPendingMessages: () => false, cwd: root, model: { provider: 'openai-codex', id: 'fake' }, thinkingLevel: 'low', hasUI: true,
+  const ctx: any = { isProjectTrusted: () => true, isIdle: () => idle, hasPendingMessages: () => false, cwd: root, model: { provider: 'openai-codex', id: 'fake' }, thinkingLevel: 'low', hasUI: true,
     sessionManager: { getSessionId: () => 'parent', getEntries: () => entries }, ui: { notify(message: string) { uiMessages.push(message); }, setStatus(key: string, text: string | undefined) { statuses.set(key, text); } } };
   extension({ registerTool: (t: any) => tools.set(t.name, t), registerCommand(name:string, command:any) { commands.set(name,command); },
     on: (name: string, fn: any) => events.set(name, fn), sendMessage(message: any, options: any) { notifications.push({message,options}); },

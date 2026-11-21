@@ -103,6 +103,20 @@ describe('installed Pi runtime with a local mock model (no paid calls)', {skip: 
     } finally { await pi.close(); }
   });
 
+  // A bare .pi holding only this file needs no trust decision in Pi, so existing project configs keep working;
+  // an explicit decline (--no-approve, as pisec runs, or a saved "no") must keep a repository from configuring workers.
+  for (const [trust, trusted] of [['--approve', true], ['none', true], ['--no-approve', false]] as const) {
+    it(`${trusted ? 'applies' : 'ignores'} the project config with trust ${trust}`, async () => {
+      const pi = await startMockPi({ trust, project: { roles: { scout: { model: 'mock-1', description: 'project role' } } } });
+      try {
+        const listed = text(await pi.probe('list_agents'));
+        assert.deepEqual(listed.roles?.map((r: any) => r.name), trusted ? ['scout'] : undefined);
+        const warned = pi.events.some((e: any) => e.type === 'extension_ui_request' && e.method === 'notify' && /does not trust this project/.test(e.message ?? ''));
+        assert.equal(warned, !trusted);
+      } finally { await pi.close(); }
+    });
+  }
+
   it('compacts an idle worker above its context budget before delivering new input', async () => {
     const pi = await startMockPi();
     try {

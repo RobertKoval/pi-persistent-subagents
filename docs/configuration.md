@@ -7,7 +7,7 @@ Files are loaded in this order:
 1. `<PI_CODING_AGENT_DIR or ~/.pi/agent>/persistent-subagents/config.json`
 2. `<project>/.pi/persistent-subagents.json`
 
-Project settings override global settings. Role maps merge by role name. An invalid file is rejected as a whole with a warning; valid settings from the other level remain in effect.
+Project settings override global settings, but only in a project Pi trusts (`ctx.isProjectTrusted()`). Pi needs no trust decision for a bare `.pi` folder that holds only this file, so it applies there; after an explicit decline (`--no-approve`, or a saved "no" in `trust.json`) the project file is ignored with a warning, so a cloned repository or a target folder cannot configure workers. Role maps merge by role name. An invalid file is rejected as a whole with a warning; valid settings from the other level remain in effect.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |

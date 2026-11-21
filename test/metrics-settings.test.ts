@@ -13,14 +13,14 @@ it('shares global metrics defaults across projects and allows explicit project i
     await mkdir(join(a,'.pi'),{recursive:true});
     await writeFile(join(a,'.pi','persistent-subagents.json'),JSON.stringify({metricsWorkers:true,maxAgents:2}));
     await saveMetricsSetting({scope:'global',agentDir},'workers',false);
-    assert.equal((await loadConfig(b,agentDir)).config.metricsWorkers,false);
-    assert.equal((await loadConfig(a,agentDir)).config.metricsWorkers,true);
+    assert.equal((await loadConfig(b, agentDir, { projectTrusted: true })).config.metricsWorkers,false);
+    assert.equal((await loadConfig(a, agentDir, { projectTrusted: true })).config.metricsWorkers,true);
     await saveMetricsSetting({scope:'project',cwd:a},'workers',null);
-    assert.equal((await loadConfig(a,agentDir)).config.metricsWorkers,false);
-    assert.equal((await loadConfig(a,agentDir)).config.maxAgents,2);
+    assert.equal((await loadConfig(a, agentDir, { projectTrusted: true })).config.metricsWorkers,false);
+    assert.equal((await loadConfig(a, agentDir, { projectTrusted: true })).config.maxAgents,2);
     await saveMetricsSetting({scope:'global',agentDir},'main',true);
-    assert.equal((await loadConfig(b,agentDir)).config.metricsMain,true);
-    assert.equal((await loadConfig(b,agentDir)).config.metricsWorkers,false);
+    assert.equal((await loadConfig(b, agentDir, { projectTrusted: true })).config.metricsMain,true);
+    assert.equal((await loadConfig(b, agentDir, { projectTrusted: true })).config.metricsWorkers,false);
     assert.deepEqual(JSON.parse(await readFile(join(a,'.pi','persistent-subagents.json'),'utf8')),{maxAgents:2});
   }finally{await rm(root,{recursive:true,force:true});}
 });

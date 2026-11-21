@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1 — 2026-11-21
+
+### Fixed
+
+- `.pi/persistent-subagents.json` was read even when Pi had declined to trust the project (`--no-approve` or a saved "no"), so the folder could set roles, limits and other worker settings. It is now ignored with a warning, as Pi ignores its own project settings.
+
 ## 0.4.0 — 2026-11-21
 
 Requires **Pi 1.6** or later in the 1.x line (tested with 1.6.0). Pi 0.85 is no longer supported.

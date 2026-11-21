@@ -154,7 +154,7 @@ describe('policy config', () => {
     await mkdir(join(cwd, '.pi'), { recursive: true });
     await writeFile(join(agentDir, 'persistent-subagents', 'config.json'), JSON.stringify(globalConfig));
     if (projectConfig) await writeFile(join(cwd, '.pi', 'persistent-subagents.json'), JSON.stringify(projectConfig));
-    return loadConfig(cwd, agentDir);
+    return loadConfig(cwd, agentDir, { projectTrusted: true });
   }
 
   it('accepts worker extensions only from the global config, because workers run them', async () => {

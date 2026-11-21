@@ -93,7 +93,7 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
   const createBundle = async (ctx: ExtensionContext): Promise<PoolBundle> => {
     const sessionId = ctx.sessionManager.getSessionId();
     const agentDir = getAgentDir();
-    const loaded = await loadConfig(ctx.cwd, agentDir);
+    const loaded = await loadConfig(ctx.cwd, agentDir, { projectTrusted: ctx.isProjectTrusted() });
     for (const warning of loaded.warnings) ctx.ui.notify(`persistent-subagents: ${warning}`, 'warning');
 
     const depth = parseDepth(process.env[WORKER_ENV.depth]);
@@ -374,7 +374,7 @@ export default function persistentSubagentsExtension(pi: ExtensionAPI) {
       const bundle = await ensurePool(ctx);
       const setTracking = async (role:'workers'|'main', enabled:boolean|null, scope:'project'|'global'='project') => {
         await saveMetricsSetting(scope==='global'?{scope,agentDir:getAgentDir()}:{scope,cwd:ctx.cwd},role,enabled);
-        const loaded=await loadConfig(ctx.cwd,getAgentDir());
+        const loaded=await loadConfig(ctx.cwd,getAgentDir(),{projectTrusted:ctx.isProjectTrusted()});
         for(const warning of loaded.warnings)ctx.ui.notify(warning,'warning');
         bundle.metrics.setTracking(role==='workers'?'worker':'main',role==='workers'?loaded.config.metricsWorkers:loaded.config.metricsMain);
       };

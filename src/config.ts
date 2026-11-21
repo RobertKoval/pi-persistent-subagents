@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { access, readFile } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 
 export const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
@@ -86,7 +86,12 @@ const ROLE_KEYS = new Set<keyof RoleConfig>([
   'provider', 'model', 'thinking', 'description', 'extensions', 'contextBudgetTokens', 'reuse', 'cacheRetention',
 ]);
 
-export async function loadConfig(cwd: string, agentDir: string): Promise<LoadedConfig> {
+export interface ConfigTrust {
+  /** Pi's ctx.isProjectTrusted(): project-local .pi configuration counts only in a trusted project. */
+  projectTrusted: boolean;
+}
+
+export async function loadConfig(cwd: string, agentDir: string, trust: ConfigTrust): Promise<LoadedConfig> {
   const warnings: string[] = [];
   let config = cloneConfig(DEFAULT_CONFIG);
   const globalPath = join(agentDir, 'persistent-subagents', 'config.json');
@@ -94,10 +99,19 @@ export async function loadConfig(cwd: string, agentDir: string): Promise<LoadedC
 
   const global = await readConfigFile(globalPath, 'global', warnings);
   if (global) config = mergeConfig(config, global);
-  const project = await readConfigFile(projectPath, 'project', warnings);
-  if (project) config = mergeConfig(config, project);
+  if (trust.projectTrusted) {
+    const project = await readConfigFile(projectPath, 'project', warnings);
+    if (project) config = mergeConfig(config, project);
+  } else if (await exists(projectPath)) {
+    // Same rule as Pi's own .pi settings: a cloned repository must not configure workers before it is trusted.
+    warnings.push(`project config ${projectPath} is ignored because Pi does not trust this project (trust it, or start Pi with --approve)`);
+  }
 
   return { config, warnings };
+}
+
+async function exists(path: string): Promise<boolean> {
+  try { await access(path); return true; } catch { return false; }
 }
 
 function cloneConfig(config: PersistentSubagentConfig): PersistentSubagentConfig {
